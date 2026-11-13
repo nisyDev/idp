@@ -31,3 +31,48 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### TalentSynk local secrets and private configuration ###
+# Add exceptions only for explicitly reviewed, fictitious examples.
+.env
+.env.*
+.envrc
+/.credentials
+/.secrets
+/credentials/
+/secrets/
+credentials.json
+credentials.yaml
+credentials.yml
+secrets.json
+secrets.yaml
+secrets.yml
+*.local.properties
+*.private.properties
+application-local*.properties
+application-private*.properties
+
+### Local private keys, certificates and truststores ###
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore
+*.crt
+*.cer
+cacerts
+jssecacerts
+
+### Local logs, caches and diagnostics ###
+*.log
+*.log.*
+*.hprof
+/logs/
+.cache/
+/.m2/
+/diagnostics/local/
+
+### Personal IntelliJ run configurations ###
+/.run/
