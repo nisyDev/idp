@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.time.Instant;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
@@ -43,20 +44,24 @@ public class AcaoPdiService {
     private final UsuarioRepository usuarios;
     private final ObjectProvider<UsuarioAutenticadoProvider> autenticacao;
     private final ObjectMapper objectMapper;
+    private final PdiAcessoService acesso;
 
     @Transactional
     public AcaoPdiResponse criar(Long pdiId, CriarAcaoPdiRequest request) {
+        return criar(pdiId, request, null);
+    }
+
+    @Transactional
+    public AcaoPdiResponse criar(Long pdiId, CriarAcaoPdiRequest request, Long versaoId) {
         UUID titularId = obterTitularId();
-        // Same lock order used by draft editing: owner -> PDI -> initial version.
-        Usuario titular = usuarios.findByIdForUpdate(titularId)
-                .filter(Usuario::isAtivo)
-                .orElseThrow(() -> new BadCredentialsException("Autenticação inválida"));
+        // Shared lifecycle lock order: users -> PDI -> editable version.
+        Usuario titular = acesso.bloquearTitular(titularId);
         validarId(pdiId);
         var pdi = pdis.buscarDoTitularParaAtualizacao(pdiId, titularId)
                 .orElseThrow(PdiRascunhoNaoEncontradoException::new);
-        PdiVersao versao = versoes.buscarInicialParaAtualizacao(pdi.getId())
+        PdiVersao versao = versoes.buscarEditavelParaAtualizacao(pdi.getId())
                 .orElseThrow(PdiRascunhoNaoEditavelException::new);
-        if (!rascunhoInicialNuncaSubmetido(versao)) throw new PdiRascunhoNaoEditavelException();
+        PdiAcessoService.validarRascunho(versao, versaoId);
         if (request == null || (request.inicioPlanejado() != null && request.fimPlanejado() != null
                 && request.inicioPlanejado().isAfter(request.fimPlanejado()))) {
             throw new IllegalArgumentException("Dados da ação inválidos");
@@ -84,18 +89,21 @@ public class AcaoPdiService {
 
     @Transactional
     public AcaoPdiResponse atualizarRascunho(Long pdiId, Long acaoId, AtualizarAcaoPdiRequest request) {
+        return atualizarRascunho(pdiId, acaoId, request, null);
+    }
+
+    @Transactional
+    public AcaoPdiResponse atualizarRascunho(Long pdiId, Long acaoId,
+                                           AtualizarAcaoPdiRequest request, Long versaoId) {
         UUID titularId = obterTitularId();
-        // Coordinate with other draft writes: owner -> PDI -> initial version.
-        Usuario titular = usuarios.findByIdForUpdate(titularId)
-                .filter(Usuario::isAtivo)
-                .orElseThrow(() -> new BadCredentialsException("Autenticação inválida"));
+        Usuario titular = acesso.bloquearTitular(titularId);
         validarId(pdiId);
         validarId(acaoId);
         var pdi = pdis.buscarDoTitularParaAtualizacao(pdiId, titularId)
                 .orElseThrow(PdiRascunhoNaoEncontradoException::new);
-        PdiVersao versao = versoes.buscarInicialParaAtualizacao(pdi.getId())
+        PdiVersao versao = versoes.buscarEditavelParaAtualizacao(pdi.getId())
                 .orElseThrow(PdiRascunhoNaoEditavelException::new);
-        if (!rascunhoInicialNuncaSubmetido(versao)) throw new PdiRascunhoNaoEditavelException();
+        PdiAcessoService.validarRascunho(versao, versaoId);
         if (request == null || (request.inicioPlanejado() != null && request.fimPlanejado() != null
                 && request.inicioPlanejado().isAfter(request.fimPlanejado()))) {
             throw new IllegalArgumentException("Dados da ação inválidos");
@@ -125,6 +133,34 @@ public class AcaoPdiService {
         return response;
     }
 
+    @Transactional
+    public void remover(Long pdiId, Long acaoId, Long versaoId) {
+        UUID titularId = obterTitularId();
+        Usuario titular = acesso.bloquearTitular(titularId);
+        validarId(pdiId);
+        validarId(acaoId);
+        var pdi = pdis.buscarDoTitularParaAtualizacao(pdiId, titularId)
+                .orElseThrow(PdiRascunhoNaoEncontradoException::new);
+        PdiVersao versao = versoes.buscarEditavelParaAtualizacao(pdiId)
+                .orElseThrow(PdiRascunhoNaoEditavelException::new);
+        PdiAcessoService.validarRascunho(versao, versaoId);
+        AcaoPdiVersao conteudo = acoesVersoes.buscarNaVersao(pdi.getId(), versao.getId(), acaoId)
+                .orElseThrow(PdiRascunhoNaoEncontradoException::new);
+        ObjectNode anterior = conteudoParaHistorico(conteudo);
+        conteudo.setRemovidaEm(Instant.now());
+        acoesVersoes.saveAndFlush(conteudo);
+        eventos.saveAndFlush(new PdiEvento(versao, conteudo.getAcaoPdi(), conteudo, null, null, titular,
+                "ACAO_REMOVIDA", null, objectMapper.createObjectNode()
+                        .put("acaoId", acaoId).put("removidaEm", conteudo.getRemovidaEm().toString()), anterior));
+    }
+
+    @Transactional(readOnly = true)
+    public List<AcaoPdiResponse> listarNaVersao(Long pdiId, Long versaoId) {
+        PdiVersao versao = acesso.versaoVisivel(pdiId, versaoId);
+        return acoesVersoes.listarNaVersao(pdiId, versao.getId()).stream()
+                .map(AcaoPdiService::paraResponse).toList();
+    }
+
     @Transactional(readOnly = true)
     public List<AcaoPdiResponse> listar(Long pdiId) {
         PdiVersao versao = buscarRascunhoPrivado(pdiId);
@@ -148,17 +184,14 @@ public class AcaoPdiService {
         validarId(pdiId);
         PdiVersao versao = versoes.buscarRascunho(pdiId, titularId, StatusAprovacaoPdi.RASCUNHO)
                 .orElseThrow(PdiRascunhoNaoEncontradoException::new);
-        if (!rascunhoInicialNuncaSubmetido(versao)) throw new PdiRascunhoNaoEncontradoException();
+        // Reads do not require an expected version; writes always enforce it for revisions.
+        if (versao.getStatusAprovacao() != StatusAprovacaoPdi.RASCUNHO
+                || versao.getSubmetidaEm() != null
+                || versao.getPdi().getVersaoVigenteId() != null
+                || versao.getPdi().getStatusExecucao() != StatusExecucaoPdi.NAO_INICIADO) {
+            throw new PdiRascunhoNaoEncontradoException();
+        }
         return versao;
-    }
-
-    private boolean rascunhoInicialNuncaSubmetido(PdiVersao versao) {
-        return Integer.valueOf(1).equals(versao.getNumero())
-                && versao.getStatusAprovacao() == StatusAprovacaoPdi.RASCUNHO
-                && versao.getSubmetidaEm() == null
-                && versao.getPdi().getVersaoVigenteId() == null
-                && versao.getPdi().getStatusExecucao() == StatusExecucaoPdi.NAO_INICIADO
-                && versoes.contarVersoesSubmetidas(versao.getPdi().getId()) == 0;
     }
 
     private UUID obterTitularId() {

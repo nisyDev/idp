@@ -13,6 +13,7 @@ import com.empresa.pdi.repository.*;
 import com.empresa.pdi.security.UsuarioAutenticadoProvider;
 import com.empresa.pdi.service.AcaoPdiService;
 import com.empresa.pdi.service.PdiService;
+import com.empresa.pdi.service.PdiAcessoService;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -69,16 +70,128 @@ class PdiSubmissaoPersistenceIT {
     @Test void inactiveManagerCannotReceiveSubmission() { run(Case.INACTIVE_MANAGER); }
 
     private void run(Case scenario) {
-        org.junit.jupiter.api.Assumptions.assumeTrue("true".equals(System.getenv(ENABLE)));
+        runProtected(ENABLE, "G7.8-" + scenario.name(), connection -> execute(connection, scenario));
+    }
+
+    @FunctionalInterface
+    interface TransactionScenario {
+        void execute(Connection connection) throws Exception;
+    }
+
+    /** Fixed labels only: never derive a stage from IDs, SQL, request data or exception text. */
+    enum DiagnosticStage {
+        CONFIGURATION, NEON_IDENTITY, DATABASE_CONNECTION, DATABASE_IDENTITY, MIGRATION_HISTORY,
+        DATABASE_PRIVILEGES, PREFLIGHT_ROLLBACK, NEON_IDENTITY_RECHECK, TRANSACTIONAL_SCENARIO,
+        ACTION_EDIT_PRIVILEGE, BOOTSTRAP, REPOSITORIES, BEGIN_TRANSACTION, CREATE_FIXTURES,
+        CREATE_DRAFT, CREATE_ACTION, SUBMIT_INITIAL, APPROVE_INITIAL, REJECT_VERSION,
+        EXPECTED_FAILURE_ASSERTIONS, FLUSH_AND_CLEAR, LOAD_REJECTED_VERSION, LOAD_REVISION,
+        ASSERT_REVISION_CONTENT, ASSERT_DECISION_EVENT, LIST_COPIED_ACTIONS, ASSERT_ACTION_COPY,
+        LOAD_REVISION_EVENT, ASSERT_COPY_MAPPING, ASSERT_ACTION_NOT_STARTED, COUNT_COPIED_COMPONENTS,
+        REMOVE_ACTION, LIST_REMAINING_ACTIONS, ASSERT_REMOVAL, COUNT_REMOVAL_EVENTS,
+        ASSERT_EMPTY_SUBMISSION_REJECTED, EDIT_COPIED_ACTION, ASSERT_ORIGINAL_PRESERVED,
+        RESUBMIT_REVISION, APPROVE_REVISION, ASSERT_APPROVAL, ROLLBACK_FIXTURES,
+        ASSERT_FIXTURE_ABSENCE, READ_ONLY_VERIFICATION_ROLLBACK, CLOSE_FACTORY, PHYSICAL_ROLLBACK, DESTROY_REGISTRY
+    }
+
+    /** Retains only a bounded, sanitized summary, including when cleanup throws later. */
+    static final class DiagnosticContext {
+        private DiagnosticStage current = DiagnosticStage.CONFIGURATION;
+        private DiagnosticStage firstFailureStage;
+        private String firstFailureSummary;
+
+        void at(DiagnosticStage stage) {
+            current = Objects.requireNonNull(stage);
+        }
+
+        void failed(Throwable failure) {
+            if (firstFailureSummary == null) {
+                firstFailureStage = current;
+                firstFailureSummary = summarize(failure);
+            }
+        }
+
+        String failureReport(Throwable failure) {
+            failed(failure);
+            return "stage=" + firstFailureStage + "; " + firstFailureSummary;
+        }
+
+        private static String summarize(Throwable failure) {
+            Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            Deque<Throwable> pending = new ArrayDeque<>();
+            Set<String> classes = new LinkedHashSet<>();
+            Set<String> states = new LinkedHashSet<>();
+            pending.add(failure);
+            int inspected = 0;
+            boolean mappingFailure = false;
+            boolean queryFailure = false;
+            while (!pending.isEmpty() && inspected++ < 32) {
+                Throwable current = pending.removeFirst();
+                if (!seen.add(current)) continue;
+                classes.add(safeClassName(current));
+                mappingFailure |= current instanceof org.hibernate.MappingException;
+                queryFailure |= current instanceof org.hibernate.QueryException;
+                if (current instanceof SQLException sql) {
+                    String state = sql.getSQLState();
+                    if (state != null && state.matches("[A-Z0-9]{5}")) states.add(state);
+                    if (sql.getNextException() != null) pending.addLast(sql.getNextException());
+                }
+                if (current.getCause() != null) pending.addLast(current.getCause());
+                for (Throwable suppressed : current.getSuppressed()) {
+                    if (pending.size() < 32) pending.addLast(suppressed);
+                }
+            }
+            String primaryState = states.stream().filter(state -> !"25P02".equals(state))
+                    .findFirst().orElse(states.stream().findFirst().orElse("unavailable"));
+            return "exception=" + safeClassName(failure) + "; causalClasses=" + classes
+                    + "; SQLState=" + primaryState + "; SQLStates=" + states
+                    + "; category=" + technicalCategory(primaryState, failure, mappingFailure, queryFailure);
+        }
+
+        private static String safeClassName(Throwable failure) {
+            String name = failure.getClass().getName();
+            return name.matches("[A-Za-z0-9_.$]{1,180}") ? name : "unavailable";
+        }
+
+        private static String technicalCategory(String state, Throwable failure,
+                                                boolean mappingFailure, boolean queryFailure) {
+            if ("42501".equals(state)) return "INSUFFICIENT_PRIVILEGE";
+            if ("42P01".equals(state)) return "UNDEFINED_TABLE";
+            if ("42703".equals(state)) return "UNDEFINED_COLUMN";
+            if ("42601".equals(state)) return "SQL_SYNTAX";
+            if ("57014".equals(state) || "55P03".equals(state)) return "TIMEOUT_OR_LOCK";
+            if (state.startsWith("23")) return "INTEGRITY_CONSTRAINT";
+            if (state.startsWith("40")) return "CONCURRENCY";
+            if (state.startsWith("08")) return "CONNECTION";
+            if (state.startsWith("28")) return "AUTHENTICATION";
+            if (state.startsWith("42")) return "SQL_OR_ACCESS_RULE";
+            if (state.startsWith("25")) return "TRANSACTION_STATE";
+            if (mappingFailure) return "JPA_MAPPING";
+            if (queryFailure) return "JPA_QUERY";
+            if (failure instanceof AssertionError) return "TEST_ASSERTION";
+            if (failure instanceof IllegalArgumentException || failure instanceof IllegalStateException) {
+                return "CONFIGURATION_OR_TEST_STATE";
+            }
+            return "OTHER_TECHNICAL_FAILURE";
+        }
+    }
+
+    /** Shared safety boundary. Callers retain their own explicit opt-in and rollback harness. */
+    static void runProtected(String enable, String scenario, TransactionScenario operation) {
+        runProtected(enable, scenario, new DiagnosticContext(), operation);
+    }
+
+    static void runProtected(String enable, String scenario, DiagnosticContext diagnostic,
+                             TransactionScenario operation) {
+        org.junit.jupiter.api.Assumptions.assumeTrue("true".equals(System.getenv(enable)));
         Logger hibernate = (Logger) LoggerFactory.getLogger("org.hibernate");
         Level oldHibernate = hibernate.getLevel();
         java.util.logging.Logger jdbcLogger = java.util.logging.Logger.getLogger("org.postgresql");
         java.util.logging.Level oldJdbc = jdbcLogger.getLevel();
-        String stage = "configuration";
         try {
             hibernate.setLevel(Level.OFF);
             jdbcLogger.setLevel(java.util.logging.Level.OFF);
             Config cfg = configuration();
+            diagnostic.at(DiagnosticStage.NEON_IDENTITY);
             verifyNeonIdentity(cfg);
             Properties props = new Properties();
             props.setProperty("user", cfg.user());
@@ -89,27 +202,34 @@ class PdiSubmissaoPersistenceIT {
             props.setProperty("socketTimeout", "30");
             props.setProperty("readOnlyMode", "transaction");
             props.setProperty("options", "-c search_path=public -c statement_timeout=15000 -c lock_timeout=5000");
-            stage = "read-only database preflight";
+            diagnostic.at(DiagnosticStage.DATABASE_CONNECTION);
             try (Connection connection = DriverManager.getConnection(cfg.url(), props)) {
                 connection.setReadOnly(true);
                 connection.setAutoCommit(false);
                 try {
+                    diagnostic.at(DiagnosticStage.DATABASE_IDENTITY);
                     verifyDatabase(connection, cfg);
+                    diagnostic.at(DiagnosticStage.MIGRATION_HISTORY);
                     verifyMigrations(connection);
+                    diagnostic.at(DiagnosticStage.DATABASE_PRIVILEGES);
                     verifyPrivileges(connection);
+                } catch (Exception | AssertionError failure) {
+                    diagnostic.failed(failure);
+                    throw failure;
                 } finally {
+                    diagnostic.at(DiagnosticStage.PREFLIGHT_ROLLBACK);
                     connection.rollback();
                 }
-                stage = "Neon identity recheck";
+                diagnostic.at(DiagnosticStage.NEON_IDENTITY_RECHECK);
                 verifyNeonIdentity(cfg);
-                stage = "transactional submission and rollback";
-                execute(connection, scenario);
+                diagnostic.at(DiagnosticStage.TRANSACTIONAL_SCENARIO);
+                operation.execute(connection);
             }
         } catch (Exception | AssertionError failure) {
             // JDBC/Hibernate exceptions may contain connection parameters or payloads.
             // Never attach raw exceptions, messages, user IDs, SQL, or secrets to reports.
-            throw new AssertionError("G7.8 failed; case=" + scenario.name()
-                    + "; stage=" + stage + "; category=" + failure.getClass().getSimpleName());
+            throw new AssertionError("PDI integration failed; case=" + scenario
+                    + "; " + diagnostic.failureReport(failure));
         } finally {
             hibernate.setLevel(oldHibernate);
             jdbcLogger.setLevel(oldJdbc);
@@ -162,10 +282,11 @@ class PdiSubmissaoPersistenceIT {
                 var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
                 beans.registerSingleton("testIdentity", (UsuarioAutenticadoProvider) identity::get);
                 var provider = beans.getBeanProvider(UsuarioAutenticadoProvider.class);
+                var access = new PdiAcessoService(users, plans, versions, em, provider, "");
                 var service = transactionalProxy(new PdiService(plans, versions, actionVersions,
-                        events, users, provider, mapper), txManager);
+                        events, users, provider, mapper, actions, access), txManager);
                 var actionService = transactionalProxy(new AcaoPdiService(actions, actionVersions,
-                        plans, versions, events, users, provider, mapper), txManager);
+                        plans, versions, events, users, provider, mapper, access), txManager);
 
                 TransactionStatus outer = txManager.getTransaction(
                         new org.springframework.transaction.support.DefaultTransactionDefinition());
@@ -323,7 +444,7 @@ class PdiSubmissaoPersistenceIT {
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> T transactionalProxy(T target, JpaTransactionManager txManager) {
+    static <T> T transactionalProxy(T target, JpaTransactionManager txManager) {
         var interceptor = new TransactionInterceptor();
         interceptor.setTransactionManager(txManager);
         interceptor.setTransactionAttributeSource(
@@ -334,7 +455,7 @@ class PdiSubmissaoPersistenceIT {
         return (T) factory.getProxy();
     }
 
-    private static final class NoCommitConnectionProvider implements ConnectionProvider {
+    static final class NoCommitConnectionProvider implements ConnectionProvider {
         private final Connection guarded;
         NoCommitConnectionProvider(Connection physical) {
             guarded = (Connection) java.lang.reflect.Proxy.newProxyInstance(
@@ -342,7 +463,7 @@ class PdiSubmissaoPersistenceIT {
                     (proxy, method, args) -> {
                         if (method.getName().equals("commit")
                                 || (method.getName().equals("setAutoCommit") && Boolean.TRUE.equals(args[0]))) {
-                            throw new SQLException("Commit is forbidden in G7.8");
+                            throw new SQLException("Commit is forbidden in PDI rollback integration tests");
                         }
                         if (method.getName().equals("close")) return null;
                         if (method.getName().equals("unwrap")) {
@@ -475,7 +596,8 @@ class PdiSubmissaoPersistenceIT {
         Map<String, String> scripts = Map.of(
                 "1", "V1__create_core_tables.sql",
                 "2", "V2__create_pdi_initial_flow.sql",
-                "3", "V3__create_usuario_credencial_local.sql");
+                "3", "V3__create_usuario_credencial_local.sql",
+                "4", "V4__add_acao_pdi_versao_removida_em.sql");
         Set<String> found = new HashSet<>();
         try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
                 "SELECT version, script, checksum, success FROM public.flyway_schema_history ORDER BY installed_rank")) {

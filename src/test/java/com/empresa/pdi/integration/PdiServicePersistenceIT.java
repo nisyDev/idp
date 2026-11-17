@@ -497,10 +497,13 @@ class PdiServicePersistenceIT {
                 beans.registerSingleton("testIdentity",
                         (com.empresa.pdi.security.UsuarioAutenticadoProvider) identity::get);
                 var mapper = new ObjectMapper().findAndRegisterModules();
+                var access = new com.empresa.pdi.service.PdiAcessoService(users, plans, versions, em,
+                        beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), "");
                 var target = new com.empresa.pdi.service.PdiService(plans, versions,
                         repositories.getRepository(com.empresa.pdi.repository.AcaoPdiVersaoRepository.class),
                         eventWriter, users,
-                        beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), mapper);
+                        beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), mapper,
+                        repositories.getRepository(com.empresa.pdi.repository.AcaoPDIRepository.class), access);
                 var interceptor = new org.springframework.transaction.interceptor.TransactionInterceptor();
                 interceptor.setTransactionManager(manager);
                 interceptor.setTransactionAttributeSource(
@@ -592,7 +595,7 @@ class PdiServicePersistenceIT {
                                     repositories.getRepository(com.empresa.pdi.repository.AcaoPDIRepository.class),
                                     repositories.getRepository(com.empresa.pdi.repository.AcaoPdiVersaoRepository.class),
                                     plans, versions, eventWriter, users,
-                                    beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), mapper);
+                                    beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), mapper, access);
                             var actionProxyFactory = new org.springframework.aop.framework.ProxyFactory(actionTarget);
                             actionProxyFactory.setProxyTargetClass(true);
                             actionProxyFactory.addAdvice(interceptor);
@@ -1018,11 +1021,12 @@ class PdiServicePersistenceIT {
     }
 
     private static void verifyMigrations(Connection connection) throws Exception {
-        // Run only after V3 has been explicitly authorized, applied and confirmed on Neon.
+        // Run only after V4 has been explicitly authorized, applied and confirmed on Neon.
         Map<String, String> scripts = Map.of(
                 "1", "V1__create_core_tables.sql",
                 "2", "V2__create_pdi_initial_flow.sql",
-                "3", "V3__create_usuario_credencial_local.sql");
+                "3", "V3__create_usuario_credencial_local.sql",
+                "4", "V4__add_acao_pdi_versao_removida_em.sql");
         Set<String> found = new java.util.HashSet<>();
         try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
                 "SELECT version, script, checksum, success FROM public.flyway_schema_history ORDER BY installed_rank")) {
@@ -1660,15 +1664,18 @@ class PdiServicePersistenceIT {
                     }
                 };
                 var eventMapper = new ObjectMapper().findAndRegisterModules();
+                var access = new com.empresa.pdi.service.PdiAcessoService(users, pdis, versions, em,
+                        beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), "");
                 plans = proxy(new com.empresa.pdi.service.PdiService(pdis, versions,
                         repositories.getRepository(com.empresa.pdi.repository.AcaoPdiVersaoRepository.class),
                         writer, users,
-                        beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), eventMapper));
+                        beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), eventMapper,
+                        repositories.getRepository(com.empresa.pdi.repository.AcaoPDIRepository.class), access));
                 actions = proxy(new com.empresa.pdi.service.AcaoPdiService(
                         repositories.getRepository(com.empresa.pdi.repository.AcaoPDIRepository.class),
                         repositories.getRepository(com.empresa.pdi.repository.AcaoPdiVersaoRepository.class),
                         pdis, versions, writer, users,
-                        beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), eventMapper));
+                        beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), eventMapper, access));
             } catch (RuntimeException | Error failure) {
                 try { if (createdFactory != null) createdFactory.close(); }
                 finally { StandardServiceRegistryBuilder.destroy(registry); }

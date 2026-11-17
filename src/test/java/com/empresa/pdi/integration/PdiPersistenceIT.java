@@ -329,11 +329,12 @@ class PdiPersistenceIT {
     }
 
     private static void verifyMigrations(Connection connection) throws Exception {
-        // Run only after V3 has been explicitly authorized, applied and confirmed on Neon.
+        // Run only after V4 has been explicitly authorized, applied and confirmed on Neon.
         Map<String, String> scripts = Map.of(
                 "1", "V1__create_core_tables.sql",
                 "2", "V2__create_pdi_initial_flow.sql",
-                "3", "V3__create_usuario_credencial_local.sql");
+                "3", "V3__create_usuario_credencial_local.sql",
+                "4", "V4__add_acao_pdi_versao_removida_em.sql");
         Set<String> found = new java.util.HashSet<>();
         try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
                 "SELECT version, script, checksum, success FROM public.flyway_schema_history ORDER BY installed_rank")) {

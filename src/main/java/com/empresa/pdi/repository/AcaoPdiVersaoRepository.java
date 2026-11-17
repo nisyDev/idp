@@ -12,15 +12,18 @@ public interface AcaoPdiVersaoRepository extends Repository<AcaoPdiVersao, Long>
     <S extends AcaoPdiVersao> S saveAndFlush(S versao);
 
     // Count only actions belonging to the exact proposal version being submitted.
-    @Query("select count(v) from AcaoPdiVersao v where v.pdiId = :pdiId and v.pdiVersaoId = :versaoId")
+    @Query("select count(v) from AcaoPdiVersao v where v.pdiId = :pdiId and v.pdiVersaoId = :versaoId "
+            + "and v.removidaEm is null")
     long contarNaVersao(@Param("pdiId") Long pdiId, @Param("versaoId") Long versaoId);
 
     @Query("select v from AcaoPdiVersao v join fetch v.acaoPdi "
-            + "where v.pdiId = :pdiId and v.pdiVersaoId = :versaoId order by v.ordem, v.id")
+            + "where v.pdiId = :pdiId and v.pdiVersaoId = :versaoId and v.removidaEm is null "
+            + "order by v.ordem, v.id")
     List<AcaoPdiVersao> listarNaVersao(@Param("pdiId") Long pdiId, @Param("versaoId") Long versaoId);
 
     @Query("select v from AcaoPdiVersao v join fetch v.acaoPdi "
-            + "where v.pdiId = :pdiId and v.pdiVersaoId = :versaoId and v.acaoPdiId = :acaoId")
+            + "where v.pdiId = :pdiId and v.pdiVersaoId = :versaoId and v.acaoPdiId = :acaoId "
+            + "and v.removidaEm is null")
     Optional<AcaoPdiVersao> buscarNaVersao(@Param("pdiId") Long pdiId,
                                          @Param("versaoId") Long versaoId, @Param("acaoId") Long acaoId);
 }

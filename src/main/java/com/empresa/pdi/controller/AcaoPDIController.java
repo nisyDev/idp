@@ -32,16 +32,25 @@ public class AcaoPDIController {
 
     @PostMapping
     public ResponseEntity<AcaoPdiResponse> criar(@PathVariable Long pdiId,
+                                               @RequestParam(required = false) Long versaoId,
                                                @RequestBody CriarAcaoPdiRequest request) {
-        AcaoPdiResponse response = service.criar(pdiId, request);
+        AcaoPdiResponse response = service.criar(pdiId, request, versaoId);
         return ResponseEntity.created(URI.create("/api/pdis/" + pdiId + "/acoes/" + response.id()))
                 .cacheControl(CacheControl.noStore()).body(response);
     }
 
     @PutMapping("/{acaoId}")
     public ResponseEntity<AcaoPdiResponse> atualizar(@PathVariable Long pdiId, @PathVariable Long acaoId,
+                                                   @RequestParam(required = false) Long versaoId,
                                                    @RequestBody AtualizarAcaoPdiRequest request) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .body(service.atualizarRascunho(pdiId, acaoId, request));
+                .body(service.atualizarRascunho(pdiId, acaoId, request, versaoId));
+    }
+
+    @DeleteMapping("/{acaoId}")
+    public ResponseEntity<Void> remover(@PathVariable Long pdiId, @PathVariable Long acaoId,
+                                        @RequestParam(required = false) Long versaoId) {
+        service.remover(pdiId, acaoId, versaoId);
+        return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
     }
 }

@@ -10,9 +10,28 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.security.access.AccessDeniedException;
 
 @RestControllerAdvice(assignableTypes = {PDIController.class, AcaoPDIController.class})
 public class PdiExceptionHandler {
+    @ExceptionHandler(ResponseStatusException.class)
+    public ProblemDetail regraNegocio(ResponseStatusException erro) {
+        // Never return exception causes or arbitrary messages from persistence layers.
+        String detalhe = switch (erro.getStatusCode().value()) {
+            case 400 -> "Dados do PDI inválidos";
+            case 403 -> "Operação não autorizada";
+            case 404 -> "PDI ou versão não encontrado";
+            case 409 -> "Operação incompatível com o estado atual; consulte novamente o PDI";
+            default -> "Não foi possível processar o PDI";
+        };
+        return ProblemDetail.forStatusAndDetail(erro.getStatusCode(), detalhe);
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ProblemDetail acessoNegado() {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.FORBIDDEN, "Operação não autorizada");
+    }
     @ExceptionHandler({PdiRascunhoNaoEditavelException.class, ConcurrencyFailureException.class})
     public ProblemDetail conflito() {
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,

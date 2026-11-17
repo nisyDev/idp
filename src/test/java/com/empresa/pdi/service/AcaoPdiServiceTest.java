@@ -81,6 +81,7 @@ class AcaoPdiServiceTest {
     @Mock PdiEventoRepository eventos;
     @Mock UsuarioRepository usuarios;
     @Mock ObjectProvider<UsuarioAutenticadoProvider> autenticacao;
+    @Mock PdiAcessoService acesso;
 
     private final ObjectMapper mapper = new ObjectMapper();
     private AcaoPdiService service;
@@ -93,7 +94,11 @@ class AcaoPdiServiceTest {
     @BeforeEach
     void configurar() {
         service = new AcaoPdiService(acoes, acoesVersoes, pdis, versoes, eventos,
-                usuarios, autenticacao, mapper);
+                usuarios, autenticacao, mapper, acesso);
+        // The lifecycle helper is covered separately; retain active-owner checks in this fixture.
+        lenient().when(acesso.bloquearTitular(any(UUID.class))).thenAnswer(call ->
+                usuarios.findByIdForUpdate(call.getArgument(0)).filter(Usuario::isAtivo)
+                        .orElseThrow(() -> new BadCredentialsException("Autenticação inválida")));
         titular = new Usuario();
         ReflectionTestUtils.setField(titular, "id", TITULAR_ID);
         titular.setNome("Titular");
@@ -156,8 +161,7 @@ class AcaoPdiServiceTest {
         var ordem = inOrder(usuarios, pdis, versoes, acoesVersoes, eventos);
         ordem.verify(usuarios).findByIdForUpdate(TITULAR_ID);
         ordem.verify(pdis).buscarDoTitularParaAtualizacao(PDI_ID, TITULAR_ID);
-        ordem.verify(versoes).buscarInicialParaAtualizacao(PDI_ID);
-        ordem.verify(versoes).contarVersoesSubmetidas(PDI_ID);
+        ordem.verify(versoes).buscarEditavelParaAtualizacao(PDI_ID);
         ordem.verify(acoesVersoes).buscarNaVersao(PDI_ID, VERSAO_ID, ACAO_ID);
         ordem.verify(acoesVersoes).saveAndFlush(conteudo);
         ordem.verify(eventos).saveAndFlush(any(PdiEvento.class));
@@ -418,9 +422,9 @@ class AcaoPdiServiceTest {
     }
 
     @Test
-    void ausenciaDeVersaoInicialEhConflitoSemAlterarDados() {
+    void ausenciaDeVersaoEditavelEhConflitoSemAlterarDados() {
         prepararPdi();
-        when(versoes.buscarInicialParaAtualizacao(PDI_ID)).thenReturn(Optional.empty());
+        when(versoes.buscarEditavelParaAtualizacao(PDI_ID)).thenReturn(Optional.empty());
 
         assertThrows(PdiRascunhoNaoEditavelException.class,
                 () -> service.atualizarRascunho(PDI_ID, ACAO_ID, novosDados()));
@@ -431,7 +435,7 @@ class AcaoPdiServiceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"AGUARDANDO_APROVACAO", "APROVADO", "REPROVADO", "RETIRADA",
-            "SUBMETIDA_ANTERIORMENTE", "OUTRA_VERSAO_SUBMETIDA", "VERSAO_2",
+            "SUBMETIDA_ANTERIORMENTE", "VERSAO_2",
             "VERSAO_VIGENTE", "PDI_EM_EXECUCAO", "PDI_CONCLUIDO"})
     void bloqueiaCadaCondicaoQueImpedeEdicaoDoRascunhoInicial(String condicao) {
         prepararVersao();
@@ -439,7 +443,6 @@ class AcaoPdiServiceTest {
             case "AGUARDANDO_APROVACAO", "APROVADO", "REPROVADO", "RETIRADA" ->
                     versao.setStatusAprovacao(StatusAprovacaoPdi.valueOf(condicao));
             case "SUBMETIDA_ANTERIORMENTE" -> versao.setSubmetidaEm(Instant.parse("2026-01-02T12:00:00Z"));
-            case "OUTRA_VERSAO_SUBMETIDA" -> when(versoes.contarVersoesSubmetidas(PDI_ID)).thenReturn(1L);
             case "VERSAO_2" -> versao.setNumero(2);
             case "VERSAO_VIGENTE" -> pdi.setVersaoVigente(versao);
             case "PDI_EM_EXECUCAO" -> pdi.setStatusExecucao(StatusExecucaoPdi.EM_EXECUCAO);
@@ -525,6 +528,135 @@ class AcaoPdiServiceTest {
         // A mock transaction manager cannot undo mutations in this detached Java fixture.
     }
 
+    @Test
+    void editaRevisaoIdentificadaSemBloquearPorSubmissoesHistoricas() {
+        prepararEdicao();
+        versao.setNumero(2);
+
+        assertEquals(responseEsperada(novosDados()),
+                service.atualizarRascunho(PDI_ID, ACAO_ID, novosDados(), VERSAO_ID));
+
+        verify(versoes, never()).contarVersoesSubmetidas(any());
+        verify(eventos).saveAndFlush(any(PdiEvento.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0, 200, 999})
+    void versaoEsperadaDivergenteImpedeEditarOutraRevisao(long esperada) {
+        prepararVersao();
+        versao.setNumero(2);
+
+        assertThrows(PdiRascunhoNaoEditavelException.class,
+                () -> service.atualizarRascunho(PDI_ID, ACAO_ID, novosDados(), esperada));
+
+        assertSemMutacaoNemGravacao();
+        verifyNoInteractions(acoesVersoes);
+    }
+
+    @Test
+    void removeSomenteConteudoDaRevisaoEPreservaIdentidadeEVinculosDeAuditoria() {
+        prepararConsultaConteudo();
+        versao.setNumero(2);
+        var anterior = dadosAtuais();
+        var estadoAcao = campos(acao, AcaoPDI.class, Set.of());
+
+        service.remover(PDI_ID, ACAO_ID, VERSAO_ID);
+
+        assertNotNull(conteudo.getRemovidaEm());
+        assertEquals(anterior, dadosAtuais());
+        assertEquals(estadoAcao, campos(acao, AcaoPDI.class, Set.of()));
+        verify(acoesVersoes).saveAndFlush(conteudo);
+        verifyNoInteractions(acoes);
+        var captor = ArgumentCaptor.forClass(PdiEvento.class);
+        verify(eventos).saveAndFlush(captor.capture());
+        PdiEvento evento = captor.getValue();
+        assertEquals("ACAO_REMOVIDA", evento.getTipo());
+        assertSame(conteudo, evento.getAcaoPdiVersao());
+        assertSame(versao, evento.getPdiVersao());
+        assertSame(titular, evento.getAutor());
+        assertEquals("Titulo anterior", evento.getSnapshot().path("titulo").asText());
+        assertEquals(conteudo.getRemovidaEm().toString(), evento.getDados().path("removidaEm").asText());
+    }
+
+    @Test
+    void acaoRemovidaOuAlheiaNaoPodeSerRemovidaNovamente() {
+        prepararVersao();
+        when(acoesVersoes.buscarNaVersao(PDI_ID, VERSAO_ID, ACAO_ID)).thenReturn(Optional.empty());
+
+        assertThrows(PdiRascunhoNaoEncontradoException.class,
+                () -> service.remover(PDI_ID, ACAO_ID, null));
+
+        assertNull(conteudo.getRemovidaEm());
+        assertSemMutacaoNemGravacao();
+    }
+
+    @Test
+    void removerRevisaoExigeIdentificacaoDaVersao() {
+        prepararVersao();
+        versao.setNumero(2);
+
+        assertThrows(PdiRascunhoNaoEditavelException.class,
+                () -> service.remover(PDI_ID, ACAO_ID, null));
+
+        verifyNoInteractions(acoesVersoes);
+        assertSemMutacaoNemGravacao();
+    }
+
+    @Test
+    void falhaDeAuditoriaDaRemocaoSolicitaRollback() {
+        prepararConsultaConteudo();
+        var falha = new DataIntegrityViolationException("Falha sintética de auditoria");
+        when(eventos.saveAndFlush(any(PdiEvento.class))).thenThrow(falha);
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        when(manager.getTransaction(any(TransactionDefinition.class))).thenReturn(status);
+
+        assertSame(falha, assertThrows(DataIntegrityViolationException.class,
+                () -> comIntercepcaoTransacional(manager).remover(PDI_ID, ACAO_ID, null)));
+
+        verify(manager).rollback(status);
+        verify(manager, never()).commit(any());
+    }
+
+    @Test
+    void leituraExplicitaDeVersaoUsaPoliticaDeVisibilidade() {
+        when(acesso.versaoVisivel(PDI_ID, VERSAO_ID)).thenReturn(versao);
+        when(acoesVersoes.listarNaVersao(PDI_ID, VERSAO_ID)).thenReturn(List.of(conteudo));
+
+        var resultado = service.listarNaVersao(PDI_ID, VERSAO_ID);
+
+        assertEquals(1, resultado.size());
+        assertEquals(CONTEUDO_ID, resultado.get(0).acaoVersaoId());
+        verify(acesso).versaoVisivel(PDI_ID, VERSAO_ID);
+        verifyNoInteractions(acoes, eventos, pdis, versoes, usuarios);
+    }
+
+    @Test
+    void listaAcoesDoRascunhoAtualMesmoQuandoNumeroDaVersaoEhMaiorQueUm() {
+        versao.setNumero(2);
+        when(autenticacao.getIfAvailable()).thenReturn(() -> TITULAR_ID);
+        when(usuarios.findById(TITULAR_ID)).thenReturn(Optional.of(titular));
+        when(versoes.buscarRascunho(PDI_ID, TITULAR_ID, StatusAprovacaoPdi.RASCUNHO))
+                .thenReturn(Optional.of(versao));
+        when(acoesVersoes.listarNaVersao(PDI_ID, VERSAO_ID)).thenReturn(List.of(conteudo));
+
+        var resultado = service.listar(PDI_ID);
+
+        assertEquals(List.of(responseEsperada(dadosAtuais())), resultado);
+        verify(versoes, never()).contarVersoesSubmetidas(any());
+        verifyNoInteractions(acoes, eventos, acesso);
+    }
+
+    @Test
+    void leituraDeOutraVersaoNaoConsultaAcoesAntesDaAutorizacao() {
+        when(acesso.versaoVisivel(PDI_ID, VERSAO_ID)).thenThrow(new PdiRascunhoNaoEncontradoException());
+
+        assertThrows(PdiRascunhoNaoEncontradoException.class,
+                () -> service.listarNaVersao(PDI_ID, VERSAO_ID));
+
+        verifyNoInteractions(acoesVersoes, acoes, eventos, usuarios, pdis, versoes);
+    }
+
     private AcaoPdiService comIntercepcaoTransacional(PlatformTransactionManager manager) {
         TransactionInterceptor interceptor = new TransactionInterceptor();
         interceptor.setTransactionManager(manager);
@@ -547,7 +679,7 @@ class AcaoPdiServiceTest {
 
     private void prepararVersao() {
         prepararPdi();
-        when(versoes.buscarInicialParaAtualizacao(PDI_ID)).thenReturn(Optional.of(versao));
+        when(versoes.buscarEditavelParaAtualizacao(PDI_ID)).thenReturn(Optional.of(versao));
     }
 
     private void prepararConsultaConteudo() {

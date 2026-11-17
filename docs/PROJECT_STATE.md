@@ -1,5 +1,53 @@
 # TalentSynk — Estado técnico do projeto
 
+## Atualização G8 — fechamento técnico em 17/11/2026
+
+Base: G7, commit `3dc60a8`. A G8 acrescenta aprovação e rejeição de versões,
+revisão automática após rejeição, cópia independente das ações, remoção lógica,
+ressubmissão e consultas por versão. Aprovação define a versão vigente e mantém
+PDI e ações sem execução iniciada. Decisões e origem/destino das cópias são auditados.
+
+Estado desta atualização: **G8 implementada e validada tecnicamente no back-end**.
+Compilação de produção e testes aprovada com JDK 21.0.11; 229 cenários locais
+aprovados cumulativamente em 11 classes, sem falhas, erros ou ignorados no resultado
+consolidado. Os nove cenários PostgreSQL existentes foram aprovados em execuções
+distintas: sete na execução inicial e dois na reexecução direcionada, abrangendo
+cinco cenários G8 e quatro de regressão G7. Isso não representa uma única execução
+dos nove nem uma certificação de toda a suíte do projeto.
+
+O trabalho G8 permanece local, sem commit, push para o GitHub ou deploy. Validação
+técnica do back-end não equivale à publicação da aplicação ou à validação ponta a
+ponta do produto. As evidências históricas abaixo mantêm seu alcance original;
+descrições antigas que limitam o PDI à versão 1 são superadas pelo contrato G8.
+
+Nas revisões, escritas exigem `versaoId` correspondente ao rascunho atual. A versão
+inicial preserva as chamadas G7 sem esse parâmetro. Gestor decide pelo vínculo
+hierárquico vigente, preservando `gestorNaSubmissao` como histórico. RH exige perfil
+ativo e UUID na configuração externa `talentsynk.pdi.rh-autorizados`, vazia por
+padrão. Autoaprovação e autorejeição são proibidas. Revisões privadas não são
+expostas ao gestor ou RH antes de submetidas.
+
+A V4 adiciona somente `acao_pdi_versao.removida_em TIMESTAMPTZ NULL`, necessária à
+remoção lógica sem quebrar as FKs dos eventos. V1–V4 estão aplicadas e validadas na
+branch Neon `test-pdi-v2`, banco `pdi_db`, schema `public`; o checksum da V4 é
+`-405865714`. Os scripts V1–V3 permanecem inalterados. Nesse ambiente foi concedido
+somente SELECT em `public.pdi_componente` a `talentsynk_test_runner`, após constatação
+da falta desse privilégio. A concessão não é uma migração nem deve ser transportada
+automaticamente para outros ambientes.
+
+Os dois cenários reexecutados comprovaram rollback e ausência das novas fixtures.
+Os identificadores das fixtures da execução anterior não foram registrados; sua
+ausência individual histórica não está comprovada.
+
+Contratos, resultados consolidados e limites da validação:
+[G8 — validação direcionada](G8_VALIDATION.md).
+
+Próximas entregas: concluir o versionamento autorizado da G8; integrar o fluxo
+essencial no front-end (G9), como próxima entrega funcional;
+validar o percurso funcional completo (G10); preparar beta e publicação autorizada
+(G11). OKRs avançados, avaliações, notícias, organograma, SSO e integrações adicionais
+permanecem para evolução futura, preservando funcionalidades existentes.
+
 Referência desta consolidação: Etapa 184G.112.
 Atualização documental: Etapa 184G.126, com evidências das Etapas 184G.116–184G.125.
 Atualização documental: Etapa 184G.148, com resultados pós-V3 confirmados em
@@ -23,11 +71,13 @@ O recorte funcional atual do back-end concentra-se em:
 - Autenticação e identidade interna.
 - Criação, consulta e edição privada de rascunhos de PDI.
 - Cadastro e consulta de ações desses rascunhos.
+- Submissão, aprovação, rejeição e revisão do PDI, com edição e remoção lógica de ações.
 - Histórico das operações implementadas.
 - Consulta autenticada ao catálogo de cargos ativos.
 
-O ciclo completo de aprovação e execução do PDI ainda não está implementado.
-A prontidão para um beta público não está comprovada.
+O fluxo de aprovação e revisão está implementado e validado no recorte G8.
+O acompanhamento de execução e o percurso integrado com o front-end ainda não estão
+integralmente validados. A prontidão para um beta público não está comprovada.
 
 ### 1.1 Classificação de estado
 
@@ -119,9 +169,11 @@ Não registrar credenciais, endpoints sensíveis, cookies ou tokens neste docume
 | V1 — `V1__create_core_tables.sql` | `cargo`, `equipe`, `usuario`, `historico_equipe`. |
 | V2 — `V2__create_pdi_initial_flow.sql` | `pdi`, `pdi_versao`, `acao_pdi`, `acao_pdi_versao`, `pdi_componente`, `pdi_componente_versao`, `entrega_submissao`, `pdi_evento`. |
 | V3 — `V3__create_usuario_credencial_local.sql` | Credencial local opcional vinculada a `Usuario`. |
+| V4 — `V4__add_acao_pdi_versao_removida_em.sql` | Adição de `acao_pdi_versao.removida_em TIMESTAMPTZ NULL`, sem valor padrão; checksum `-405865714`. |
 
-A aplicação e validação de V1, V2 e V3 em `test-pdi-v2` foram informadas no
-histórico da conversa. O histórico remoto não foi consultado novamente.
+A aplicação e validação de V1–V4 em `test-pdi-v2` foram confirmadas nos procedimentos
+autorizados. O histórico remoto não foi consultado novamente nesta atualização
+exclusivamente documental.
 
 A existência de uma tabela ou de seus estados não significa que o fluxo
 funcional correspondente esteja implementado.
@@ -134,12 +186,13 @@ funcional correspondente esteja implementado.
 | Autenticação local | VALIDADO no recorte informado | Código, testes HTTP isolados e autenticações reais dos três perfis informadas pela usuária. |
 | Autenticação demonstrativa | VALIDADO no recorte de regressão | HTTP Basic e fluxos existentes de PDI cobertos pelos testes anteriores. |
 | Rascunhos privados de PDI | VALIDADO no recorte implementado | Criação, consulta e edição; contratos HTTP e cenários históricos de persistência aprovados. |
-| Ações do PDI | PARCIAL | Cadastro e consulta em rascunho implementados e validados; demais operações ainda indisponíveis. |
-| Histórico de PDI | PARCIAL | Registro transacional de criação, edição de rascunho e adição de ação; sem API de consulta de histórico. |
+| Ações do PDI | VALIDADO no recorte G8 | Cadastro, consulta, edição, cópia independente e remoção lógica da revisão, preservando versões históricas. Execução e entregas não integram essa validação. |
+| Histórico de PDI | VALIDADO no recorte G8 | Eventos transacionais das operações e decisões, rastreabilidade das cópias e consulta das versões autorizadas; sem API genérica de eventos. |
 | Componentes e entregas | PARCIAL | Tabelas, enums e entidades JPA existem; fluxos de aplicação ainda não implementados. |
 | Consulta de cargos ativos | VALIDADO com limitações | Código, 18 testes automatizados e consulta integrada informada. |
 | Administração HTTP de cargos | PENDENTE | Não há endpoints de escrita liberados, inclusive para RH_ADMIN. |
-| Submissão, aprovação e execução do PDI | PENDENTE | Estados e estrutura de persistência não equivalem a operações funcionais. |
+| Submissão, aprovação e revisão do PDI | VALIDADO no recorte G7/G8 | Testes locais e nove cenários PostgreSQL cumulativos aprovados; autorização, auditoria e preservação histórica. |
+| Execução e acompanhamento do PDI | PARCIAL | Estados e estrutura disponíveis; aprovação preserva execução não iniciada. O percurso funcional completo permanece sujeito à integração e validação posteriores. |
 | Reuniões | PARCIAL, legado bloqueado | Entidade, repository e consultas legadas; sem fluxo completo ou integração Teams. |
 | OKRs, feedbacks, avaliações e notícias | PENDENTE como fluxos funcionais | Constam na especificação documental; não foram encontrados módulos funcionais correspondentes no inventário inspecionado. |
 | Capacitações e competências | PENDENTE como fluxos funcionais | Requisitos documentados, sem implementação funcional correspondente no recorte atual. |
@@ -563,17 +616,13 @@ não reabre nem redefine permissões de negócio.
 
 As atividades abaixo dependem de autorização específica:
 
-1. Manter este documento atualizado após cada incremento funcional validado, registrando evidências, limitações e decisões relevantes.
-2. Completar as evidências delimitadas do catálogo:
-   exclusão de inativos em dados reais e validação integrada com servidor real
-   do bloqueio em demo-local e no perfil padrão.
-3. Registrar futuras reexecuções dos testes de persistência após novas revisões,
-   mantendo distintos os resultados pós-V3 das Etapas 184G.145 e 184G.147 e as
-   aprovações históricas, além da validação dedicada de credenciais locais da
-   Etapa 184G.153.
-4. Preparar o próximo incremento funcional pequeno do PDI, reutilizando a
-   estrutura existente. Componentes e entregas são uma base ainda sem fluxo.
-5. Tratar a prontidão para beta público separadamente da demonstração local.
+1. Preparar o conjunto G8 para um único commit e push, executados somente após autorização.
+2. Integrar na G9 o fluxo essencial do PDI ao front-end existente: criar, editar,
+   cadastrar ações, submeter, decidir, corrigir e ressubmeter ou consultar a vigente.
+3. Validar o percurso funcional completo na G10, sem repetir automaticamente
+   baterias já aprovadas, e preparar o beta controlado e a publicação autorizada na G11.
+4. Preservar os resultados e limites históricos, mantendo melhorias de catálogo,
+   módulos avançados e integrações adicionais fora do caminho crítico do MVP.
 
 Não iniciar implementação simultânea de todos os módulos documentados.
 Não reabrir decisões de negócio encerradas nem ampliar permissões implicitamente.
@@ -602,6 +651,7 @@ execução não fornecidas.
 | Etapa 184G.153 | Cinco testes de integração de UsuarioCredencialLocalPersistenceIT aprovados no Neon, branch test-pdi-v2; cobertura de @MapsId, UUID compartilhado, hash fictício, timestamps, PK, FK, NOT NULL e CHECK, com rollback e verificações de ausência conforme implementadas. Execução distinta dos resultados históricos de PDI e autenticação. |
 | Etapa 184G.154 | Revogação confirmada das seis permissões temporárias de INSERT/UPDATE em usuario_credencial_local, com SELECT preservado. |
 | Etapa 184G.155 | Encerramento documental da validação dedicada da V3, preservando o histórico e as limitações; sem novas execuções de testes, builds, aplicação ou banco. |
+| Fechamento G8 — 17/11/2026 | Compilação Java 21.0.11 aprovada; 229 cenários locais e nove PostgreSQL cumulativos aprovados em execuções distintas; V4 aplicada e validada em test-pdi-v2, checksum -405865714; SELECT mínimo em pdi_componente confirmado. Os dois cenários reexecutados comprovaram rollback e ausência das novas fixtures. Consolidação documental sem nova execução, conexão, commit, push ou deploy. |
 
 ### Referências locais
 

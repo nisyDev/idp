@@ -28,6 +28,8 @@ import org.springframework.security.web.context.HttpSessionSecurityContextReposi
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.util.matcher.RegexRequestMatcher;
+import org.springframework.security.web.servlet.util.matcher.MvcRequestMatcher;
+import org.springframework.web.servlet.handler.HandlerMappingIntrospector;
 
 /** Session-based HTTP authentication only; the demo keeps its separate Basic chain. */
 @Configuration(proxyBeanMethods = false)
@@ -48,9 +50,12 @@ public class LocalHttpSecurityConfig {
     }
 
     @Bean
-    SecurityFilterChain localSecurity(HttpSecurity http, AuthenticationManager manager) throws Exception {
+    SecurityFilterChain localSecurity(HttpSecurity http, AuthenticationManager manager,
+                                      HandlerMappingIntrospector introspector) throws Exception {
         var contextRepository = new DelegatingSecurityContextRepository(
                 new RequestAttributeSecurityContextRepository(), new HttpSessionSecurityContextRepository());
+        // Match only MVC paths: query parameters are validated by the controller/service.
+        var paths = new MvcRequestMatcher.Builder(introspector);
         return http.authenticationManager(manager)
                 .securityContext(context -> context
                         .securityContextRepository(contextRepository).requireExplicitSave(true))
@@ -68,13 +73,22 @@ public class LocalHttpSecurityConfig {
                         .hasAnyRole("COLABORADOR", "GESTOR", "RH_ADMIN")
                         .requestMatchers(HttpMethod.GET, "/api/pdis").authenticated()
                         .requestMatchers(HttpMethod.GET, "/api/pdis/submetidos").authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+/submeter$", "POST")).authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+$", "GET")).authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+$", "PUT")).authenticated()
+                        .requestMatchers(HttpMethod.GET, "/api/pdis/pendentes").hasAnyRole("GESTOR", "RH_ADMIN")
+                        .requestMatchers(paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}/versoes"),
+                                paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}/versoes/{versaoId:[0-9]+}"),
+                                paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}/versoes/{versaoId:[0-9]+}/acoes")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.POST, "/api/pdis/{id:[0-9]+}/versoes/{versaoId:[0-9]+}/aprovar"),
+                                paths.pattern(HttpMethod.POST, "/api/pdis/{id:[0-9]+}/versoes/{versaoId:[0-9]+}/reprovar"))
+                        .hasAnyRole("GESTOR", "RH_ADMIN")
+                        .requestMatchers(paths.pattern(HttpMethod.POST, "/api/pdis/{id:[0-9]+}/submeter")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.PUT, "/api/pdis/{id:[0-9]+}")).authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/pdis").authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+/acoes$", "POST")).authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+/acoes(?:/[0-9]+)?$", "GET")).authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+/acoes/[0-9]+$", "PUT")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.POST, "/api/pdis/{id:[0-9]+}/acoes")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}/acoes"),
+                                paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}/acoes/{acaoId:[0-9]+}")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.PUT, "/api/pdis/{id:[0-9]+}/acoes/{acaoId:[0-9]+}")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.DELETE, "/api/pdis/{id:[0-9]+}/acoes/{acaoId:[0-9]+}")).authenticated()
                         .anyRequest().denyAll())
                 .formLogin(login -> login
                         // Disable the generated HTML login page; only POST is authorized here.

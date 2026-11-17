@@ -26,8 +26,10 @@ import com.empresa.pdi.service.AcaoPdiService;
 import com.empresa.pdi.service.CargoConsultaService;
 import com.empresa.pdi.service.IdentidadeAutenticadaService;
 import com.empresa.pdi.service.PdiService;
+import com.empresa.pdi.service.PdiAcessoService;
 import com.empresa.pdi.service.UsuarioService;
 import jakarta.persistence.EntityManagerFactory;
+import jakarta.persistence.EntityManager;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Set;
@@ -88,7 +90,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import({HttpSecurityConfig.class, DemoAuthenticationConfig.class,
         LocalAuthenticationConfig.class, LocalHttpSecurityConfig.class,
         SecurityContextUsuarioAutenticadoProvider.class,
-        PdiService.class, AcaoPdiService.class, UsuarioService.class,
+        PdiService.class, PdiAcessoService.class, AcaoPdiService.class, UsuarioService.class,
         CargoConsultaService.class, IdentidadeAutenticadaService.class})
 @ActiveProfiles(value = "demo-local", inheritProfiles = false)
 @ContextConfiguration(initializers = CargoDemoProfileHttpTest.DemoOnlyEnvironment.class)
@@ -114,6 +116,7 @@ class CargoDemoProfileHttpTest {
 
     // Only persistence dependencies are mocks; controllers, services and security are real.
     @MockBean UsuarioRepository usuarios;
+    @MockBean EntityManager entityManager;
     @MockBean UsuarioCredencialLocalRepository credenciais;
     @MockBean CargoRepository cargos;
     @MockBean EquipeRepository equipes;

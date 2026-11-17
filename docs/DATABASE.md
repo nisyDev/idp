@@ -2,6 +2,31 @@
 
 > **Estado:** especificação documental extraída da planilha `PDI_Modelagem - Copia(2).xlsx` em 03/11/2026. Não é uma migração SQL, nem implica que os pontos pendentes estejam resolvidos.
 
+> **Atualização G8 (17/11/2026):** para o fluxo de PDI implementado, os nomes
+> efetivos são os das migrations V1–V4 e do código: `PDI`, `PdiVersao`,
+> `AcaoPDI`, `AcaoPdiVersao` e `PdiEvento`. Aprovação usa
+> `AGUARDANDO_APROVACAO`, `APROVADO` e `REPROVADO`; decisão pertence à versão
+> (`decidida_em`, `decidido_por_id`, `justificativa_decisao`). Rejeição preserva
+> a versão e cria outro `RASCUNHO`, com novas identidades de ações e conteúdo
+> planejado copiado, sem execução ou evidências históricas. A V4 adiciona somente
+> `acao_pdi_versao.removida_em TIMESTAMPTZ NULL`, sem valor padrão, preservando FKs
+> da auditoria e removendo a ação somente da proposta editável. V1–V4 estão aplicadas
+> e validadas na branch Neon de testes `test-pdi-v2`, banco `pdi_db`, schema `public`.
+> O checksum da V4 é `-405865714`; os scripts V1–V3 permanecem inalterados.
+> Gestor responsável é o vínculo atual; `gestor_na_submissao_id` é histórico.
+> RH_ADMIN precisa de autorização explícita na configuração externa, vazia por
+> padrão. Rascunhos permanecem privados. Esta atualização prevalece sobre os
+> nomes legados de PDI no catálogo abaixo. A compilação Java 21.0.11 e a validação
+> técnica G8 foram aprovadas: 229 cenários locais e nove PostgreSQL cumulativos em
+> execuções distintas. Esta atualização apenas registra as evidências anteriores;
+> não executou banco, migrations ou testes. Ver [contrato e validação G8](G8_VALIDATION.md).
+>
+> **Privilégio mínimo no ambiente de testes:** foi concedido exclusivamente SELECT
+> em `public.pdi_componente` ao usuário `talentsynk_test_runner`, após confirmação
+> de ausência da permissão efetiva. A leitura é necessária aos cenários G8. Esse
+> GRANT é específico de `test-pdi-v2`, não integra V1–V4 e não deve ser propagado
+> automaticamente para outros ambientes nem interpretado como permissão global.
+
 ## 1. Objetivo e fonte de verdade
 
 Este documento orienta a implementação do esquema relacional do TalentSynk. A aba **Entidades** define campos e regras locais; **Relacionamentos** define vínculos e integridade; **Matriz de Permissões** e **Perfis de Acesso** orientam a autorização da aplicação. Textos da planilha foram mantidos sem substituição silenciosa de decisões. Quando um campo está vazio na origem, a documentação mostra `—`.

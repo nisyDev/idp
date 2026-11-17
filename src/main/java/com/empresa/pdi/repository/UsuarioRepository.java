@@ -10,6 +10,9 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface UsuarioRepository extends JpaRepository<Usuario, UUID> {
+    @Query("select u.gestor.id from Usuario u where u.id = :id")
+    Optional<UUID> buscarGestorId(@Param("id") UUID id);
+
     @Query("select u from Usuario u where lower(u.email) = lower(:email)")
     Optional<Usuario> findByEmailIgnoreCase(@Param("email") String email);
 

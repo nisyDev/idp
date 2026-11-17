@@ -24,6 +24,7 @@ import com.empresa.pdi.security.LocalHttpSecurityConfig;
 import com.empresa.pdi.security.SecurityContextUsuarioAutenticadoProvider;
 import com.empresa.pdi.security.UsuarioPrincipal;
 import com.empresa.pdi.service.AcaoPdiService;
+import com.empresa.pdi.service.PdiAcessoService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManagerFactory;
@@ -59,6 +60,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.test.context.ActiveProfiles;
@@ -107,6 +109,7 @@ class AcaoPdiEdicaoHttpTest {
     @MockBean AcaoPDIRepository acoes;
     @MockBean AcaoPdiVersaoRepository acoesVersoes;
     @MockBean PdiEventoRepository eventos;
+    @MockBean PdiAcessoService acesso;
 
     private Usuario owner;
     private PdiVersao draft;
@@ -128,6 +131,9 @@ class AcaoPdiEdicaoHttpTest {
         when(credenciais.findById(OWNER)).thenReturn(Optional.of(credential));
         when(usuarios.findById(OWNER)).thenReturn(Optional.of(owner));
         when(usuarios.findByIdForUpdate(OWNER)).thenReturn(Optional.of(owner));
+        when(acesso.bloquearTitular(any(UUID.class))).thenAnswer(call ->
+                usuarios.findByIdForUpdate(call.getArgument(0)).filter(Usuario::isAtivo)
+                        .orElseThrow(() -> new BadCredentialsException("Autenticação inválida")));
         draft = draft(owner, 11L, 21L);
         action = action(draft, 31L, 41L);
         PdiVersao foreignDraft = draft(other, 12L, 22L);
@@ -140,11 +146,12 @@ class AcaoPdiEdicaoHttpTest {
         when(pdis.buscarDoTitularParaAtualizacao(anyLong(), any(UUID.class)))
                 .thenAnswer(call -> Long.valueOf(11).equals(call.getArgument(0))
                         && OWNER.equals(call.getArgument(1)) ? Optional.of(draft.getPdi()) : Optional.empty());
-        when(versoes.buscarInicialParaAtualizacao(11L)).thenReturn(Optional.of(draft));
+        when(versoes.buscarEditavelParaAtualizacao(11L)).thenReturn(Optional.of(draft));
         when(acoesVersoes.buscarNaVersao(anyLong(), anyLong(), anyLong())).thenAnswer(call ->
                 allActions.stream().filter(value -> value.getPdiId().equals(call.getArgument(0))
                         && value.getPdiVersaoId().equals(call.getArgument(1))
-                        && value.getAcaoPdiId().equals(call.getArgument(2))).findFirst());
+                        && value.getAcaoPdiId().equals(call.getArgument(2))
+                        && value.getRemovidaEm() == null).findFirst());
         when(acoesVersoes.saveAndFlush(any(AcaoPdiVersao.class))).thenAnswer(call -> call.getArgument(0));
     }
 
@@ -250,11 +257,13 @@ class AcaoPdiEdicaoHttpTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void missingOrInvalidCsrfIs403BeforeService(boolean missing) throws Exception {
+        draft.setNumero(2);
         Token token = authenticatedToken();
-        MockHttpServletRequestBuilder request = put(PATH).session(token.session())
+        MockHttpServletRequestBuilder request = put(PATH + "?versaoId=21").session(token.session())
                 .contentType(MediaType.APPLICATION_JSON).content(CHANGE);
         if (!missing) request.header(token.header(), "csrf-invalido");
-        mvc.perform(request).andExpect(status().isForbidden());
+        mvc.perform(request).andExpect(status().isForbidden())
+                .andExpect(result -> assertEquals("versaoId=21", result.getRequest().getQueryString()));
         verifyNoInteractions(pdis, versoes, acoes, acoesVersoes, eventos);
         assertOriginalContent();
     }
@@ -275,15 +284,20 @@ class AcaoPdiEdicaoHttpTest {
     void missingAndForeignPdiHaveTheSame404ForEveryProfile(PerfilUsuario profile) throws Exception {
         owner.setPerfilAcesso(profile);
         Token token = authenticatedToken();
-        MvcResult missing = edit(token, "/api/pdis/999/acoes/31", CHANGE)
+        MvcResult missing = edit(token, "/api/pdis/999/acoes/31?versaoId=21", CHANGE)
                 .andExpect(status().isNotFound()).andReturn();
-        MvcResult foreign = edit(token, "/api/pdis/12/acoes/32", CHANGE)
+        MvcResult foreign = edit(token, "/api/pdis/12/acoes/32?versaoId=22", CHANGE)
                 .andExpect(status().isNotFound()).andReturn();
+        assertEquals("versaoId=21", missing.getRequest().getQueryString());
+        assertEquals("versaoId=22", foreign.getRequest().getQueryString());
+        mvc.perform(delete("/api/pdis/12/acoes/32?versaoId=22").session(token.session())
+                        .header(token.header(), token.value()))
+                .andExpect(status().isNotFound());
         JsonNode first = mapper.readTree(missing.getResponse().getContentAsString());
         JsonNode second = mapper.readTree(foreign.getResponse().getContentAsString());
         assertEquals(first.path("detail"), second.path("detail"));
         verify(pdis).buscarDoTitularParaAtualizacao(999L, OWNER);
-        verify(pdis).buscarDoTitularParaAtualizacao(12L, OWNER);
+        verify(pdis, times(2)).buscarDoTitularParaAtualizacao(12L, OWNER);
         verifyNoInteractions(acoesVersoes);
         assertOriginalContent();
         assertNoWrites();
@@ -301,7 +315,7 @@ class AcaoPdiEdicaoHttpTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"SUBMITTED", "APPROVED", "NO_INITIAL_VERSION", "CURRENT_VERSION",
-            "EXECUTING", "PREVIOUS_SUBMISSION"})
+            "EXECUTING", "REVISION_WITHOUT_VERSION"})
     void ineligiblePdiOrVersionIs409WithoutWrites(String state) throws Exception {
         switch (state) {
             case "SUBMITTED" -> {
@@ -309,10 +323,10 @@ class AcaoPdiEdicaoHttpTest {
                 draft.setSubmetidaEm(Instant.parse("2026-08-01T00:00:00Z"));
             }
             case "APPROVED" -> draft.setStatusAprovacao(StatusAprovacaoPdi.APROVADO);
-            case "NO_INITIAL_VERSION" -> when(versoes.buscarInicialParaAtualizacao(11L)).thenReturn(Optional.empty());
+            case "NO_INITIAL_VERSION" -> when(versoes.buscarEditavelParaAtualizacao(11L)).thenReturn(Optional.empty());
             case "CURRENT_VERSION" -> draft.getPdi().setVersaoVigente(draft);
             case "EXECUTING" -> draft.getPdi().setStatusExecucao(StatusExecucaoPdi.EM_EXECUCAO);
-            case "PREVIOUS_SUBMISSION" -> when(versoes.contarVersoesSubmetidas(11L)).thenReturn(1L);
+            case "REVISION_WITHOUT_VERSION" -> draft.setNumero(2);
             default -> throw new IllegalArgumentException("Cenário de teste desconhecido");
         }
         edit(authenticatedToken(), PATH, CHANGE).andExpect(status().isConflict());
@@ -338,12 +352,14 @@ class AcaoPdiEdicaoHttpTest {
                  "id":999,"acaoVersaoId":999,"pdiId":999,"pdiVersaoId":999,
                  "titularId":"%s","usuarioId":"%s","autorId":"%s",
                  "ordem":999,"numeroVersao":999,"statusExecucao":"CONCLUIDA",
-                 "statusAprovacao":"APROVADO","progresso":100}
+                 "statusAprovacao":"APROVADO","progresso":100,
+                 "removidaEm":"2026-01-01T00:00:00Z"}
                 """.formatted(OTHER, OTHER, OTHER);
         MvcResult result = edit(authenticatedToken(), PATH, body).andExpect(status().isOk()).andReturn();
         assertDtoAndIdentity(result);
         assertEquals("Conteúdo permitido", action.getTitulo());
         assertSame(owner, draft.getPdi().getUsuario());
+        assertNull(action.getRemovidaEm());
         ArgumentCaptor<PdiEvento> event = ArgumentCaptor.forClass(PdiEvento.class);
         verify(eventos).saveAndFlush(event.capture());
         assertSame(owner, event.getValue().getAutor());
@@ -376,9 +392,9 @@ class AcaoPdiEdicaoHttpTest {
     }
 
     @Test
-    void deletePatchAndLegacyRoutesRemainForbiddenEvenWithCsrf() throws Exception {
+    void patchAndLegacyRoutesRemainForbiddenEvenWithCsrf() throws Exception {
         Token token = authenticatedToken();
-        for (MockHttpServletRequestBuilder request : List.of(delete(PATH), patch(PATH),
+        for (MockHttpServletRequestBuilder request : List.of(patch(PATH),
                 put("/api/acoes/31"), post("/api/pdis/11/acoes/31/componentes"))) {
             mvc.perform(request.session(token.session()).header(token.header(), token.value())
                             .contentType(MediaType.APPLICATION_JSON).content("{}"))
@@ -386,6 +402,93 @@ class AcaoPdiEdicaoHttpTest {
         }
         assertOriginalContent();
         assertNoWrites();
+    }
+
+    @Test
+    void revisionCanBeEditedOnlyWithItsExpectedVersion() throws Exception {
+        draft.setNumero(2);
+        Token token = authenticatedToken();
+        edit(token, PATH, CHANGE).andExpect(status().isConflict());
+        edit(token, PATH + "?versaoId=20", CHANGE).andExpect(status().isConflict())
+                .andExpect(result -> assertEquals("versaoId=20", result.getRequest().getQueryString()));
+        assertNoWrites();
+
+        edit(token, PATH + "?versaoId=21", CHANGE).andExpect(status().isOk())
+                .andExpect(result -> assertEquals("versaoId=21", result.getRequest().getQueryString()))
+                .andExpect(jsonPath("$.pdiVersaoId").value(21))
+                .andExpect(jsonPath("$.titulo").value("Título atualizado"));
+
+        verify(versoes, never()).contarVersoesSubmetidas(any());
+        verify(eventos).saveAndFlush(any(PdiEvento.class));
+    }
+
+    @Test
+    void deletePreservesRowsAndAuditLinksAndReturnsNoContent() throws Exception {
+        draft.setNumero(2);
+        Token token = authenticatedToken();
+        mvc.perform(delete(PATH + "?versaoId=21").session(token.session()).header(token.header(), token.value()))
+                .andExpect(status().isNoContent())
+                .andExpect(result -> assertEquals("versaoId=21", result.getRequest().getQueryString()))
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"));
+
+        assertNotNull(action.getRemovidaEm());
+        assertOriginalContent();
+        verify(acoesVersoes).saveAndFlush(action);
+        verifyNoInteractions(acoes);
+        var captor = ArgumentCaptor.forClass(PdiEvento.class);
+        verify(eventos).saveAndFlush(captor.capture());
+        assertEquals("ACAO_REMOVIDA", captor.getValue().getTipo());
+        assertSame(action, captor.getValue().getAcaoPdiVersao());
+        assertSame(draft, captor.getValue().getPdiVersao());
+
+        // The repository fixture mirrors the effective-content query after logical removal.
+        edit(token, PATH + "?versaoId=21", CHANGE).andExpect(status().isNotFound());
+        verify(eventos, times(1)).saveAndFlush(any(PdiEvento.class));
+    }
+
+    @Test
+    void deleteRequiresSessionAndCsrf() throws Exception {
+        draft.setNumero(2);
+        Token token = authenticatedToken();
+        mvc.perform(delete(PATH + "?versaoId=21").session(token.session())).andExpect(status().isForbidden());
+        mvc.perform(delete(PATH + "?versaoId=21").session(token.session()).header(token.header(), "csrf-invalido"))
+                .andExpect(status().isForbidden());
+        Token anonymous = token(null);
+        mvc.perform(delete(PATH + "?versaoId=21").session(anonymous.session())
+                        .header(anonymous.header(), anonymous.value()))
+                .andExpect(status().isUnauthorized());
+        assertNoWrites();
+    }
+
+    @Test
+    void deleteCannotTargetHistoricalVersionOrAnUnidentifiedRevision() throws Exception {
+        draft.setNumero(2);
+        Token token = authenticatedToken();
+        for (String path : List.of(PATH, PATH + "?versaoId=20")) {
+            mvc.perform(delete(path).session(token.session()).header(token.header(), token.value()))
+                    .andExpect(status().isConflict());
+        }
+        draft.setStatusAprovacao(StatusAprovacaoPdi.REPROVADO);
+        mvc.perform(delete(PATH + "?versaoId=21").session(token.session()).header(token.header(), token.value()))
+                .andExpect(status().isConflict());
+        assertNull(action.getRemovidaEm());
+        assertNoWrites();
+    }
+
+    @Test
+    void nonNumericVersionQueryIs400BeforeActionServiceForPutAndDelete() throws Exception {
+        draft.setNumero(2);
+        Token token = authenticatedToken();
+        for (MockHttpServletRequestBuilder request : List.of(put(PATH + "?versaoId=invalid"),
+                delete(PATH + "?versaoId=invalid"))) {
+            mvc.perform(request.session(token.session()).header(token.header(), token.value())
+                            .contentType(MediaType.APPLICATION_JSON).content(CHANGE))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(result -> assertEquals("versaoId=invalid", result.getRequest().getQueryString()));
+        }
+        verifyNoInteractions(pdis, versoes, acoes, acoesVersoes, eventos);
+        assertOriginalContent();
+        assertNull(action.getRemovidaEm());
     }
 
     private ResultActions edit(Token token, String path, String body) throws Exception {

@@ -17,6 +17,8 @@ import com.empresa.pdi.security.DemoAuthenticationConfig;
 import com.empresa.pdi.security.HttpSecurityConfig;
 import com.empresa.pdi.security.SecurityContextUsuarioAutenticadoProvider;
 import com.empresa.pdi.service.PdiService;
+import com.empresa.pdi.service.PdiAcessoService;
+import jakarta.persistence.EntityManager;
 import com.empresa.pdi.service.AcaoPdiService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -59,7 +61,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @WebMvcTest(controllers = {PDIController.class, AcaoPDIController.class, CsrfController.class})
 @Import({HttpSecurityConfig.class, DemoAuthenticationConfig.class,
-        SecurityContextUsuarioAutenticadoProvider.class, PdiService.class, AcaoPdiService.class, PdiExceptionHandler.class})
+        SecurityContextUsuarioAutenticadoProvider.class, PdiService.class, PdiAcessoService.class, AcaoPdiService.class, PdiExceptionHandler.class})
 @ActiveProfiles("demo-local")
 class PdiHttpTest {
     private static final UUID OWNER = UUID.randomUUID();
@@ -78,6 +80,7 @@ class PdiHttpTest {
 
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper mapper;
+    @MockBean EntityManager entityManager;
     @MockBean UsuarioRepository usuarios;
     @MockBean PDIRepository pdis;
     @MockBean PdiVersaoRepository versoes;
@@ -126,7 +129,7 @@ class PdiHttpTest {
         when(pdis.buscarDoTitularParaAtualizacao(anyLong(), any(UUID.class)))
                 .thenAnswer(call -> Long.valueOf(11).equals(call.getArgument(0))
                         && OWNER.equals(call.getArgument(1)) ? Optional.of(draft.getPdi()) : Optional.empty());
-        when(versoes.buscarInicialParaAtualizacao(11L)).thenReturn(Optional.of(draft));
+        when(versoes.buscarEditavelParaAtualizacao(11L)).thenReturn(Optional.of(draft));
         when(versoes.buscarRascunho(anyLong(), any(UUID.class), eq(StatusAprovacaoPdi.RASCUNHO)))
                 .thenAnswer(call -> Long.valueOf(11).equals(call.getArgument(0))
                         && OWNER.equals(call.getArgument(1)) ? Optional.of(draft)
@@ -350,8 +353,8 @@ class PdiHttpTest {
     }
 
     @Test
-    void putPreviouslySubmittedPlanIs409WithoutWrites() throws Exception {
-        when(versoes.contarVersoesSubmetidas(11L)).thenReturn(1L);
+    void stalePutWithoutExpectedVersionIs409ForRevision() throws Exception {
+        draft.setNumero(2);
         edit("owner", 11, "{}").andExpect(status().isConflict());
         verify(versoes, never()).saveAndFlush(any());
         verifyNoInteractions(eventos);
@@ -420,7 +423,7 @@ class PdiHttpTest {
         var order = inOrder(usuarios, pdis, versoes, acoes, acoesVersoes, eventos);
         order.verify(usuarios).findByIdForUpdate(OWNER);
         order.verify(pdis).buscarDoTitularParaAtualizacao(11L, OWNER);
-        order.verify(versoes).buscarInicialParaAtualizacao(11L);
+        order.verify(versoes).buscarEditavelParaAtualizacao(11L);
         order.verify(acoes).saveAndFlush(identity.capture());
         order.verify(acoesVersoes).saveAndFlush(content.capture());
         order.verify(eventos).saveAndFlush(event.capture());
@@ -553,21 +556,21 @@ class PdiHttpTest {
     }
 
     @Test
-    void actionPostToPreviouslySubmittedPdiIs409() throws Exception {
-        when(versoes.contarVersoesSubmetidas(11L)).thenReturn(1L);
+    void staleActionPostWithoutExpectedVersionIs409ForRevision() throws Exception {
+        draft.setNumero(2);
         addAction("owner", 11, "{}").andExpect(status().isConflict());
         verifyNoInteractions(acoes, acoesVersoes, eventos);
     }
 
     @Test
-    void actionsDoNotAcceptNonInitialDraftVersion() throws Exception {
+    void revisionReadsRemainPrivateButLegacyWritesNeedExpectedVersion() throws Exception {
         draft.setNumero(2);
         addAction("owner", 11, "{}").andExpect(status().isConflict());
         mvc.perform(get("/api/pdis/11/acoes").header(HttpHeaders.AUTHORIZATION, basic("owner")))
-                .andExpect(status().isNotFound());
+                .andExpect(status().isOk()).andExpect(jsonPath("$[0].pdiVersaoId").value(21));
         mvc.perform(get("/api/pdis/11/acoes/31").header(HttpHeaders.AUTHORIZATION, basic("owner")))
-                .andExpect(status().isNotFound());
-        verifyNoInteractions(acoes, acoesVersoes, eventos);
+                .andExpect(status().isOk());
+        verifyNoInteractions(acoes, eventos);
     }
 
     @Test
@@ -623,7 +626,8 @@ class PdiHttpTest {
 
     @Test
     void actionReadHidesUnavailableDraft() throws Exception {
-        when(versoes.contarVersoesSubmetidas(11L)).thenReturn(1L);
+        draft.setStatusAprovacao(StatusAprovacaoPdi.AGUARDANDO_APROVACAO);
+        draft.setSubmetidaEm(Instant.parse("2026-01-02T00:00:00Z"));
         mvc.perform(get("/api/pdis/11/acoes").header(HttpHeaders.AUTHORIZATION, basic("owner")))
                 .andExpect(status().isNotFound());
         mvc.perform(get("/api/pdis/11/acoes/31").header(HttpHeaders.AUTHORIZATION, basic("owner")))
@@ -670,6 +674,28 @@ class PdiHttpTest {
                     .andExpect(status().isForbidden());
         }
         verifyNoInteractions(pdis, versoes, acoes, acoesVersoes, eventos);
+    }
+
+    @Test
+    void demoDraftQueryPreservesVersionGuardAndDoesNotReleaseSubmission() throws Exception {
+        Token token = token("owner");
+        mvc.perform(put("/api/pdis/11?versaoId=20").header(HttpHeaders.AUTHORIZATION, basic("owner"))
+                        .session(token.session()).header(token.header(), token.value())
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isConflict());
+        verifyNoInteractions(eventos);
+        // Basic authentication invalidates the previous CSRF token after each write.
+        token = token("owner");
+        mvc.perform(put("/api/pdis/11?versaoId=21").header(HttpHeaders.AUTHORIZATION, basic("owner"))
+                        .session(token.session()).header(token.header(), token.value())
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(result -> assertEquals("versaoId=21", result.getRequest().getQueryString()));
+        token = token("owner");
+        mvc.perform(post("/api/pdis/11/submeter?versaoId=21").header(HttpHeaders.AUTHORIZATION, basic("owner"))
+                        .session(token.session()).header(token.header(), token.value()))
+                .andExpect(status().isForbidden());
+        verify(eventos).saveAndFlush(any(PdiEvento.class));
     }
 
     private org.springframework.test.web.servlet.ResultActions addAction(String login, long pdiId, String body) throws Exception {

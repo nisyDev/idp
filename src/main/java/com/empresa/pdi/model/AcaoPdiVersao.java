@@ -6,6 +6,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import java.time.LocalDate;
+import java.time.Instant;
 
 @Entity
 @Table(name = "acao_pdi_versao", uniqueConstraints = {
@@ -67,6 +68,10 @@ public class AcaoPdiVersao {
 
     @Column(name = "ordem", nullable = false)
     private Integer ordem = 0;
+
+    // Removal belongs to this proposal's content, never to another version's identity.
+    @Column(name = "removida_em", columnDefinition = "timestamptz")
+    private Instant removidaEm;
 
     public void definirVinculos(PdiVersao versao, AcaoPDI acao) {
         if (versao == null || acao == null || versao.getId() == null || acao.getId() == null

@@ -121,6 +121,10 @@ class PdiMappingBootstrapTest {
             assertEquals(Map.of("id", "pdi_id", "versao_vigente_id", "id"), columnPairs);
 
             var actionVersion = metadata.getEntityBinding(AcaoPdiVersao.class.getName());
+            Property removedAt = actionVersion.getProperty("removidaEm");
+            assertEquals("removida_em", removedAt.getColumns().get(0).getName());
+            assertTrue(removedAt.getColumns().get(0).isNullable());
+            assertTrue(removedAt.isUpdateable());
             Map<String, Map<String, String>> expectedPairs = Map.of(
                     "fk_acao_versao_plano", Map.of("pdi_id", "pdi_id", "pdi_versao_id", "id"),
                     "fk_acao_versao_identidade", Map.of("pdi_id", "pdi_id", "acao_pdi_id", "id"));

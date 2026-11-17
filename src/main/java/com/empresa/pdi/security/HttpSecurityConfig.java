@@ -12,7 +12,8 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.www.BasicAuthenticationEntryPoint;
 import org.springframework.http.HttpMethod;
-import org.springframework.security.web.util.matcher.RegexRequestMatcher;
+import org.springframework.security.web.servlet.util.matcher.MvcRequestMatcher;
+import org.springframework.web.servlet.handler.HandlerMappingIntrospector;
 
 @Configuration(proxyBeanMethods = false)
 public class HttpSecurityConfig {
@@ -36,7 +37,9 @@ public class HttpSecurityConfig {
 
     @Bean
     @Profile("demo-local")
-    SecurityFilterChain demoSecurity(HttpSecurity http, AuthenticationManager manager) throws Exception {
+    SecurityFilterChain demoSecurity(HttpSecurity http, AuthenticationManager manager,
+                                     HandlerMappingIntrospector introspector) throws Exception {
+        var paths = new MvcRequestMatcher.Builder(introspector);
         BasicAuthenticationEntryPoint entryPoint = new BasicAuthenticationEntryPoint() {
             @Override
             public void commence(jakarta.servlet.http.HttpServletRequest request,
@@ -51,11 +54,12 @@ public class HttpSecurityConfig {
         return common(http).authenticationManager(manager)
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers(HttpMethod.GET, "/api/pdis", "/api/csrf").authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+$", "GET")).authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+$", "PUT")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.PUT, "/api/pdis/{id:[0-9]+}")).authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/pdis").authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+/acoes$", "POST")).authenticated()
-                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+/acoes(?:/[0-9]+)?$", "GET")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.POST, "/api/pdis/{id:[0-9]+}/acoes")).authenticated()
+                        .requestMatchers(paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}/acoes"),
+                                paths.pattern(HttpMethod.GET, "/api/pdis/{id:[0-9]+}/acoes/{acaoId:[0-9]+}")).authenticated()
                         .anyRequest().denyAll())
                 .httpBasic(basic -> basic.authenticationEntryPoint(entryPoint))
                 .exceptionHandling(errors -> errors.authenticationEntryPoint(entryPoint)).build();

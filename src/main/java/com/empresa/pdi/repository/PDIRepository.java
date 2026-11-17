@@ -11,6 +11,13 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface PDIRepository extends JpaRepository<PDI, Long> {
+    @Query("select p.usuario.id from PDI p where p.id = :id")
+    Optional<UUID> buscarTitularId(@Param("id") Long id);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select p from PDI p where p.id = :id")
+    Optional<PDI> buscarParaAtualizacao(@Param("id") Long id);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from PDI p where p.id = :id and p.usuario.id = :titular")
     Optional<PDI> buscarDoTitularParaAtualizacao(@Param("id") Long id, @Param("titular") UUID titular);

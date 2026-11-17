@@ -18,6 +18,11 @@ import com.empresa.pdi.security.SecurityContextUsuarioAutenticadoProvider;
 import com.empresa.pdi.security.UsuarioPrincipal;
 import com.empresa.pdi.service.IdentidadeAutenticadaService;
 import com.empresa.pdi.service.PdiService;
+import com.empresa.pdi.service.AcaoPdiService;
+import com.empresa.pdi.service.PdiAcessoService;
+import com.empresa.pdi.repository.AcaoPDIRepository;
+import com.empresa.pdi.repository.AcaoPdiVersaoRepository;
+import jakarta.persistence.EntityManager;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManagerFactory;
@@ -76,7 +81,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         DataSourceAutoConfiguration.class, HibernateJpaAutoConfiguration.class, FlywayAutoConfiguration.class})
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import({HttpSecurityConfig.class, LocalAuthenticationConfig.class, LocalHttpSecurityConfig.class,
-        SecurityContextUsuarioAutenticadoProvider.class, PdiService.class, PdiExceptionHandler.class,
+        SecurityContextUsuarioAutenticadoProvider.class, PdiService.class, PdiAcessoService.class, PdiExceptionHandler.class,
         IdentidadeAutenticadaService.class})
 @ActiveProfiles(value = "auth-local", inheritProfiles = false)
 class LocalAuthenticationHttpTest {
@@ -92,6 +97,10 @@ class LocalAuthenticationHttpTest {
     @Autowired ObjectMapper mapper;
     @Autowired ApplicationContext context;
     @Autowired @Qualifier("localSessionCookies") ServletContextInitializer sessionCookies;
+    @MockBean AcaoPdiService acaoService;
+    @MockBean EntityManager entityManager;
+    @MockBean AcaoPDIRepository acoes;
+    @MockBean AcaoPdiVersaoRepository acoesVersoes;
     @MockBean UsuarioRepository usuarios;
     @MockBean UsuarioCredencialLocalRepository credenciais;
     @MockBean PDIRepository pdis;
@@ -132,7 +141,12 @@ class LocalAuthenticationHttpTest {
 
     @AfterEach
     void noPersistenceWrites() {
-        verifyNoInteractions(pdis, eventos);
+        verify(pdis, never()).save(any());
+        verify(pdis, never()).saveAndFlush(any());
+        // A submission ownership check may read the scalar owner ID, but every read
+        // must be explicitly verified by its test. Unverified reads or writes fail.
+        verifyNoMoreInteractions(pdis);
+        verifyNoInteractions(eventos, acoes, acoesVersoes);
         verify(versoes, never()).saveAndFlush(any());
         verify(usuarios, never()).save(any());
         verify(credenciais, never()).save(any());
@@ -360,13 +374,60 @@ class LocalAuthenticationHttpTest {
                     .andExpect(header().doesNotExist(HttpHeaders.LOCATION));
         }
         Token token = token(authenticated);
-        for (String path : List.of("/api/usuarios", "/api/pdis/11/submeter")) {
-            mvc.perform(post(path).session(authenticated).header(token.header(), token.value())
-                            .contentType(MediaType.APPLICATION_JSON).content("{}"))
-                    .andExpect(status().isForbidden());
-        }
+        mvc.perform(post("/api/usuarios").session(authenticated).header(token.header(), token.value())
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isForbidden());
         assertFalse(authenticated.isInvalid(), "GET logout não deve encerrar a sessão");
         verifyNoInteractions(versoes);
+    }
+
+    @Test
+    void submissionWithRealQueryHidesForeignAndMissingPdisFromAuthenticatedRh() throws Exception {
+        MockHttpSession authenticated = authenticatedSession(OTHER_EMAIL);
+        Token token = token(authenticated);
+        when(pdis.buscarTitularId(11L)).thenReturn(Optional.of(OWNER));
+        when(pdis.buscarTitularId(999L)).thenReturn(Optional.empty());
+
+        MvcResult foreign = mvc.perform(post("/api/pdis/11/submeter?versaoId=21")
+                        .session(authenticated).header(token.header(), token.value()))
+                .andExpect(status().isNotFound()).andReturn();
+        MvcResult missing = mvc.perform(post("/api/pdis/999/submeter?versaoId=21")
+                        .session(authenticated).header(token.header(), token.value()))
+                .andExpect(status().isNotFound()).andReturn();
+
+        JsonNode foreignBody = mapper.readTree(foreign.getResponse().getContentAsString());
+        JsonNode missingBody = mapper.readTree(missing.getResponse().getContentAsString());
+        assertEquals(foreignBody.path("title"), missingBody.path("title"));
+        assertEquals(foreignBody.path("detail"), missingBody.path("detail"));
+        assertEquals("versaoId=21", foreign.getRequest().getQueryString());
+        verify(pdis).buscarTitularId(11L);
+        verify(pdis).buscarTitularId(999L);
+        verifyNoInteractions(versoes);
+    }
+
+    @Test
+    void anonymousSubmissionWithRealQueryRequiresAuthenticationEvenWithValidCsrf() throws Exception {
+        Token token = token(null);
+
+        mvc.perform(post("/api/pdis/11/submeter?versaoId=21")
+                        .session(token.session()).header(token.header(), token.value()))
+                .andExpect(status().isUnauthorized());
+
+        verifyNoInteractions(usuarios, credenciais, pdis, versoes);
+    }
+
+    @Test
+    void submissionWithRealQueryStillRequiresValidCsrf() throws Exception {
+        MockHttpSession authenticated = authenticatedSession(OWNER_EMAIL);
+        Token token = token(authenticated);
+
+        mvc.perform(post("/api/pdis/11/submeter?versaoId=21").session(authenticated))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/pdis/11/submeter?versaoId=21")
+                        .session(authenticated).header(token.header(), "invalid"))
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(pdis, versoes);
     }
 
     @Test
