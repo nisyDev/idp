@@ -67,6 +67,8 @@ public class LocalHttpSecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/cargos")
                         .hasAnyRole("COLABORADOR", "GESTOR", "RH_ADMIN")
                         .requestMatchers(HttpMethod.GET, "/api/pdis").authenticated()
+                        .requestMatchers(HttpMethod.GET, "/api/pdis/submetidos").authenticated()
+                        .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+/submeter$", "POST")).authenticated()
                         .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+$", "GET")).authenticated()
                         .requestMatchers(new RegexRequestMatcher("^/api/pdis/[0-9]+$", "PUT")).authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/pdis").authenticated()

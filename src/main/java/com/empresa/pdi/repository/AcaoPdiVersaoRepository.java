@@ -11,6 +11,10 @@ import org.springframework.data.repository.query.Param;
 public interface AcaoPdiVersaoRepository extends Repository<AcaoPdiVersao, Long> {
     <S extends AcaoPdiVersao> S saveAndFlush(S versao);
 
+    // Count only actions belonging to the exact proposal version being submitted.
+    @Query("select count(v) from AcaoPdiVersao v where v.pdiId = :pdiId and v.pdiVersaoId = :versaoId")
+    long contarNaVersao(@Param("pdiId") Long pdiId, @Param("versaoId") Long versaoId);
+
     @Query("select v from AcaoPdiVersao v join fetch v.acaoPdi "
             + "where v.pdiId = :pdiId and v.pdiVersaoId = :versaoId order by v.ordem, v.id")
     List<AcaoPdiVersao> listarNaVersao(@Param("pdiId") Long pdiId, @Param("versaoId") Long versaoId);

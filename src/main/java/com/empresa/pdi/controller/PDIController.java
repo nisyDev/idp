@@ -3,6 +3,7 @@ package com.empresa.pdi.controller;
 import com.empresa.pdi.dto.CriarPdiRequest;
 import com.empresa.pdi.dto.AtualizarPdiRascunhoRequest;
 import com.empresa.pdi.dto.PdiRascunhoResponse;
+import com.empresa.pdi.dto.PdiSubmetidoResponse;
 import com.empresa.pdi.service.PdiService;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
@@ -23,6 +24,19 @@ public class PDIController {
     @GetMapping
     public ResponseEntity<List<PdiRascunhoResponse>> listar() {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(service.listarRascunhos());
+    }
+
+    // Submitted proposals remain visible after leaving the draft-only GET /api/pdis.
+    @GetMapping("/submetidos")
+    public ResponseEntity<List<PdiSubmetidoResponse>> listarSubmetidos() {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(service.listarSubmetidos());
+    }
+
+    @PostMapping("/{id}/submeter")
+    public ResponseEntity<PdiSubmetidoResponse> submeter(@PathVariable Long id) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(service.submeter(id));
     }
 
     @GetMapping("/{id}")

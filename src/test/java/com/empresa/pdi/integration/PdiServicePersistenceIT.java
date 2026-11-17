@@ -497,7 +497,9 @@ class PdiServicePersistenceIT {
                 beans.registerSingleton("testIdentity",
                         (com.empresa.pdi.security.UsuarioAutenticadoProvider) identity::get);
                 var mapper = new ObjectMapper().findAndRegisterModules();
-                var target = new com.empresa.pdi.service.PdiService(plans, versions, eventWriter, users,
+                var target = new com.empresa.pdi.service.PdiService(plans, versions,
+                        repositories.getRepository(com.empresa.pdi.repository.AcaoPdiVersaoRepository.class),
+                        eventWriter, users,
                         beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), mapper);
                 var interceptor = new org.springframework.transaction.interceptor.TransactionInterceptor();
                 interceptor.setTransactionManager(manager);
@@ -1658,7 +1660,9 @@ class PdiServicePersistenceIT {
                     }
                 };
                 var eventMapper = new ObjectMapper().findAndRegisterModules();
-                plans = proxy(new com.empresa.pdi.service.PdiService(pdis, versions, writer, users,
+                plans = proxy(new com.empresa.pdi.service.PdiService(pdis, versions,
+                        repositories.getRepository(com.empresa.pdi.repository.AcaoPdiVersaoRepository.class),
+                        writer, users,
                         beans.getBeanProvider(com.empresa.pdi.security.UsuarioAutenticadoProvider.class), eventMapper));
                 actions = proxy(new com.empresa.pdi.service.AcaoPdiService(
                         repositories.getRepository(com.empresa.pdi.repository.AcaoPDIRepository.class),

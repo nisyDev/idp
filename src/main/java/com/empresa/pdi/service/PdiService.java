@@ -4,16 +4,19 @@ import com.empresa.pdi.dto.CriarPdiRequest;
 import com.empresa.pdi.dto.AtualizarPdiRascunhoRequest;
 import com.empresa.pdi.exception.PdiRascunhoNaoEditavelException;
 import com.empresa.pdi.dto.PdiRascunhoResponse;
+import com.empresa.pdi.dto.PdiSubmetidoResponse;
 import com.empresa.pdi.enums.StatusAprovacaoPdi;
 import com.empresa.pdi.enums.StatusExecucaoPdi;
 import com.empresa.pdi.model.PDI;
 import com.empresa.pdi.model.PdiEvento;
 import com.empresa.pdi.model.PdiVersao;
+import com.empresa.pdi.model.Usuario;
 import com.empresa.pdi.exception.PdiRascunhoNaoEncontradoException;
 import java.util.List;
 import com.empresa.pdi.repository.PDIRepository;
 import com.empresa.pdi.repository.PdiEventoRepository;
 import com.empresa.pdi.repository.PdiVersaoRepository;
+import com.empresa.pdi.repository.AcaoPdiVersaoRepository;
 import com.empresa.pdi.repository.UsuarioRepository;
 import com.empresa.pdi.security.UsuarioAutenticadoProvider;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -23,7 +26,10 @@ import org.springframework.security.authentication.AuthenticationCredentialsNotF
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
+import java.time.Instant;
 import java.util.UUID;
 
 @Service
@@ -31,6 +37,7 @@ import java.util.UUID;
 public class PdiService {
     private final PDIRepository pdis;
     private final PdiVersaoRepository versoes;
+    private final AcaoPdiVersaoRepository acoesVersoes;
     private final PdiEventoRepository eventos;
     private final UsuarioRepository usuarios;
     private final ObjectProvider<UsuarioAutenticadoProvider> autenticacao;
@@ -131,6 +138,67 @@ public class PdiService {
                 .stream().map(PdiService::paraResponse).toList();
     }
 
+    /** Initial proposal submission; no approval or current-version promotion is performed. */
+    @Transactional
+    public PdiSubmetidoResponse submeter(Long id) {
+        UUID titularId = obterTitularId();
+        // Serialize with draft edits and action creations: owner -> PDI -> initial version.
+        Usuario titular = usuarios.findByIdForUpdate(titularId)
+                .filter(Usuario::isAtivo)
+                .orElseThrow(() -> new BadCredentialsException("Autenticação inválida"));
+        if (id == null || id <= 0) throw new PdiRascunhoNaoEncontradoException();
+        PDI pdi = pdis.buscarDoTitularParaAtualizacao(id, titularId)
+                .orElseThrow(PdiRascunhoNaoEncontradoException::new);
+        PdiVersao versao = versoes.buscarInicialParaAtualizacao(pdi.getId())
+                .orElseThrow(PdiRascunhoNaoEditavelException::new);
+        if (!Integer.valueOf(1).equals(versao.getNumero())
+                || versao.getStatusAprovacao() != StatusAprovacaoPdi.RASCUNHO
+                || versao.getSubmetidaEm() != null
+                || pdi.getVersaoVigenteId() != null
+                || pdi.getStatusExecucao() != StatusExecucaoPdi.NAO_INICIADO
+                || versoes.contarVersoesSubmetidas(pdi.getId()) != 0) {
+            throw new PdiRascunhoNaoEditavelException();
+        }
+        if (acoesVersoes.contarNaVersao(pdi.getId(), versao.getId()) < 1) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Cadastre pelo menos uma ação antes de submeter o PDI");
+        }
+        Usuario gestorVinculado = titular.getGestor();
+        if (gestorVinculado == null || gestorVinculado.getId() == null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "O titular precisa possuir um gestor ativo para submeter o PDI");
+        }
+        // Lock and re-read the manager to reject inactive managers at submission time.
+        Usuario gestorAtivo = usuarios.findByIdForUpdate(gestorVinculado.getId())
+                .filter(Usuario::isAtivo)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT,
+                        "O titular precisa possuir um gestor ativo para submeter o PDI"));
+
+        Instant agora = Instant.now();
+        var anterior = objectMapper.createObjectNode()
+                .put("statusAprovacao", StatusAprovacaoPdi.RASCUNHO.name())
+                .putNull("submetidaEm")
+                .putNull("gestorNaSubmissaoId");
+        versao.setStatusAprovacao(StatusAprovacaoPdi.AGUARDANDO_APROVACAO);
+        versao.setSubmetidaEm(agora);
+        versao.setGestorNaSubmissao(gestorAtivo);
+        versoes.saveAndFlush(versao);
+        var dados = objectMapper.createObjectNode()
+                .put("statusAprovacao", versao.getStatusAprovacao().name())
+                .put("submetidaEm", agora.toString())
+                .put("gestorNaSubmissaoId", gestorAtivo.getId().toString());
+        eventos.saveAndFlush(new PdiEvento(versao, null, null, null, null, titular,
+                "PDI_SUBMETIDO", null, dados, anterior));
+        return paraSubmetidoResponse(versao);
+    }
+
+    /** Submitted proposals remain visible even after they leave RASCUNHO. */
+    @Transactional(readOnly = true)
+    public List<PdiSubmetidoResponse> listarSubmetidos() {
+        return versoes.listarSubmetidos(obterTitularAtivoId()).stream()
+                .map(PdiService::paraSubmetidoResponse).toList();
+    }
+
     private UUID obterTitularId() {
         UsuarioAutenticadoProvider provider = autenticacao.getIfAvailable();
         if (provider == null) throw new AuthenticationCredentialsNotFoundException("Autenticação necessária");
@@ -145,6 +213,16 @@ public class PdiService {
             throw new BadCredentialsException("Autenticação inválida");
         }
         return id;
+    }
+
+    private static PdiSubmetidoResponse paraSubmetidoResponse(PdiVersao versao) {
+        PDI pdi = versao.getPdi();
+        return new PdiSubmetidoResponse(pdi.getId(), versao.getId(), versao.getNumero(),
+                pdi.getVersaoVigenteId(), pdi.getStatusExecucao(), versao.getStatusAprovacao(),
+                versao.getTitulo(), versao.getObjetivo(), versao.getInicioPlanejado(),
+                versao.getFimPlanejado(), pdi.getCriadoEm(), versao.getCriadaEm(),
+                versao.getSubmetidaEm(), versao.getGestorNaSubmissao() == null
+                        ? null : versao.getGestorNaSubmissao().getId());
     }
 
     private static PdiRascunhoResponse paraResponse(PdiVersao versao) {

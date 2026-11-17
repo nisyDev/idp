@@ -22,6 +22,12 @@ public interface PdiVersaoRepository extends Repository<PdiVersao, Long> {
     @Query("select count(v) from PdiVersao v where v.pdi.id = :pdiId and v.submetidaEm is not null")
     long contarVersoesSubmetidas(@Param("pdiId") Long pdiId);
 
+    // Submitted versions are never exposed across PDI owners, including after a decision.
+    @Query("select v from PdiVersao v join fetch v.pdi p left join fetch v.gestorNaSubmissao "
+            + "where p.usuario.id = :titular and v.submetidaEm is not null "
+            + "order by v.submetidaEm desc, v.id desc")
+    List<PdiVersao> listarSubmetidos(@Param("titular") UUID titular);
+
     @Query("select v from PdiVersao v join fetch v.pdi p where p.usuario.id = :titular "
             + "and v.statusAprovacao = :status and v.submetidaEm is null order by p.criadoEm desc, p.id desc")
     List<PdiVersao> listarRascunhos(@Param("titular") UUID titular,
